@@ -1251,6 +1251,7 @@ class VFXExporterApp(tk.Tk):
         self.resizable(False, False)
         self.attributes("-alpha", 0)
         self.withdraw()
+        self._programmatic_resize = False
 
         self.engine = None
         self.episode_markers = []
@@ -1279,6 +1280,12 @@ class VFXExporterApp(tk.Tk):
             var.trace_add("write", lambda *args: self.after(0, self._update_filename_preview))
 
         self._build_ui()
+        self.after(200, self._disable_reset_btn)
+        self._check_deps_on_start()
+        self.after(2000, self._check_for_updates)
+        self.after(1, self._center_window)
+
+    def _center_window(self):
         self.update_idletasks()
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
@@ -1288,15 +1295,12 @@ class VFXExporterApp(tk.Tk):
             w, h = 900, 800
         x = (sw - w) // 2
         y = (sh - h) // 2
-        self.geometry(f"{w}x{h}+{x}+{y}")
-        self.update_idletasks()
+        # Only set position, not size — so log box can expand window height freely
+        self.geometry(f"+{x}+{y}")
         self.deiconify()
         self.attributes("-alpha", 1)
         self.lift()
         self.focus_force()
-        self.after(200, self._disable_reset_btn)
-        self._check_deps_on_start()
-        self.after(2000, self._check_for_updates)
 
     def _build_ui(self):
         main = tk.Frame(self, bg=BG_OUTER, padx=28, pady=24)
@@ -1632,12 +1636,19 @@ class VFXExporterApp(tk.Tk):
         # ── LOG (hidden by default) ─────────────────────────────────────────
         log_header = tk.Frame(main, bg=BG_DARK)
         log_header.pack(fill="x", pady=(28, 0))
+
+        btn_bg   = BG_INPUT
+        btn_hov  = "#3a3a3a"
+        btn_prs  = "#1a1a1a"
         self.btn_log_toggle = tk.Label(log_header, text="SHOW LOG",
                                         font=("SF Pro Display", 10, "bold"),
-                                        bg=BG_INPUT, fg=TEXT_PRIMARY,
-                                        padx=10, pady=3, cursor="")
+                                        bg=btn_bg, fg=TEXT_PRIMARY,
+                                        padx=10, pady=4)
         self.btn_log_toggle.pack(side="left")
-        self.btn_log_toggle.bind("<Button-1>", lambda e: self._toggle_log())
+        self.btn_log_toggle.bind("<Enter>",           lambda e: self.btn_log_toggle.config(bg=btn_hov))
+        self.btn_log_toggle.bind("<Leave>",           lambda e: self.btn_log_toggle.config(bg=btn_bg))
+        self.btn_log_toggle.bind("<ButtonPress-1>",   lambda e: self.btn_log_toggle.config(bg=btn_prs))
+        self.btn_log_toggle.bind("<ButtonRelease-1>", lambda e: (self.btn_log_toggle.config(bg=btn_hov), self._toggle_log()))
 
         self.log_frame_outer = tk.Frame(main, bg=BG_DARK)
         log_p = self._panel(self.log_frame_outer)
@@ -1936,10 +1947,17 @@ class VFXExporterApp(tk.Tk):
             self.log_frame_outer.pack_forget()
             self.btn_log_toggle.config(text="SHOW LOG")
             self._log_visible = False
+            self.update_idletasks()
+            self.resizable(False, False)
+            self.geometry(f"{self.winfo_width()}x{self.winfo_reqheight()}")
         else:
-            self.log_frame_outer.pack(fill="x")
+            self.resizable(False, True)
+            self.log_frame_outer.pack(fill="both", expand=True)
             self.btn_log_toggle.config(text="HIDE LOG")
             self._log_visible = True
+            self.update_idletasks()
+            self.geometry(f"{self.winfo_width()}x{self.winfo_reqheight()}")
+            self.resizable(False, False)
 
     def _set_step_done(self, step_index):
         def _do():
@@ -2310,25 +2328,16 @@ class VFXExporterApp(tk.Tk):
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
                 req = urllib.request.urlopen(VERSION_URL, context=ctx, timeout=10)
-                raw = req.read().decode()
-                with open(os.path.expanduser("~/Desktop/ft_update_log.txt"), "a") as lf:
-                    lf.write(f"Response: {raw}\n")
-                data = json.loads(raw)
+                data = json.loads(req.read().decode())
                 remote = data.get("version", "0")
                 notes  = data.get("release_notes", "")
-                with open(os.path.expanduser("~/Desktop/ft_update_log.txt"), "a") as lf:
-                    lf.write(f"Remote: {remote}, Local: {APP_VERSION}\n")
                 def _parse(v):
                     try: return tuple(int(x) for x in v.split("."))
                     except: return (0,)
                 if _parse(remote) > _parse(APP_VERSION):
                     self.after(0, lambda: self._show_update_banner(remote, notes, data.get("download_url", DOWNLOAD_URL)))
-                else:
-                    with open(os.path.expanduser("~/Desktop/ft_update_log.txt"), "a") as lf:
-                        lf.write(f"No update needed: {remote} <= {APP_VERSION}\n")
-            except Exception as e:
-                with open(os.path.expanduser("~/Desktop/ft_update_log.txt"), "a") as lf:
-                    lf.write(f"Update check failed: {e}\n")
+            except Exception:
+                pass
         threading.Thread(target=task, daemon=True).start()
 
     def _show_update_banner(self, remote_version, notes, download_url):
