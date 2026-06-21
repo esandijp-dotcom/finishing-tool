@@ -1,26 +1,60 @@
 """
 Finishing Tool Installer
+Downloads source files from GitHub and builds the app locally.
 """
 import tkinter as tk
-from tkinter import messagebox
-import threading, subprocess, sys, os, shutil
+import threading, subprocess, sys, os, shutil, tempfile
 
-ACCENT   = "#E8A838"
-BG_DARK  = "#141414"
-TEXT     = "#FFFFFF"
-TEXT_MUTED = "#888888"
-SUCCESS  = "#4CAF50"
-ERROR    = "#E05555"
+ACCENT       = "#E8A838"
+ACCENT_HOVER = "#f0c060"
+ACCENT_PRESS = "#a06010"
+BG_DARK      = "#141414"
+TEXT         = "#FFFFFF"
+TEXT_MUTED   = "#888888"
+SUCCESS      = "#4CAF50"
+ERROR        = "#E05555"
+
+GITHUB_BASE  = "https://raw.githubusercontent.com/esandijp-dotcom/finishing-tool/main"
+FILES        = ["main.py", "thinking.gif", "icon.png", "version.json",
+                "build_and_install.sh", "setup.py", "build_icon.py"]
 
 STEPS = [
-    "Checking Python version...",
-    "Installing Homebrew (if needed)...",
+    "Checking for Homebrew...",
     "Installing Tesseract OCR...",
-    "Installing Python packages...",
-    "Installing the app...",
+    "Downloading source files...",
+    "Building & installing app...",
 ]
 
-PIP_PACKAGES = ["pillow", "opencv-python", "pytesseract", "openpyxl", "numpy"]
+
+def _rounded_btn(parent, text, command, bg=ACCENT, fg="#000000", width=160, height=36,
+                 radius=8, hover=None, press=None):
+    c = tk.Canvas(parent, width=width, height=height,
+                  bg=BG_DARK, highlightthickness=0, cursor="")
+    c._bg = bg
+    c._text = text
+    _hover = hover or ACCENT_HOVER
+    _press = press or ACCENT_PRESS
+
+    def _draw(color):
+        c.delete("all")
+        r = radius
+        c.create_arc(0, 0, r*2, r*2, start=90, extent=90, fill=color, outline=color)
+        c.create_arc(width-r*2, 0, width, r*2, start=0, extent=90, fill=color, outline=color)
+        c.create_arc(0, height-r*2, r*2, height, start=180, extent=90, fill=color, outline=color)
+        c.create_arc(width-r*2, height-r*2, width, height, start=270, extent=90, fill=color, outline=color)
+        c.create_rectangle(r, 0, width-r, height, fill=color, outline=color)
+        c.create_rectangle(0, r, width, height-r, fill=color, outline=color)
+        c.create_text(width//2, height//2, text=c._text,
+                      font=("SF Pro Display", 13, "bold"), fill=fg)
+
+    c._draw = _draw
+    _draw(bg)
+    c.bind("<Enter>",           lambda e: _draw(_hover))
+    c.bind("<Leave>",           lambda e: _draw(c._bg))
+    c.bind("<ButtonPress-1>",   lambda e: _draw(_press))
+    c.bind("<ButtonRelease-1>", lambda e: (_draw(_hover), command()))
+    return c
+
 
 class InstallerApp(tk.Tk):
     def __init__(self):
@@ -28,21 +62,16 @@ class InstallerApp(tk.Tk):
         self.title("Finishing Tool Installer")
         self.configure(bg=BG_DARK)
         self.resizable(False, False)
-        self.geometry("520x600")
         self._build_ui()
 
     def _build_ui(self):
-        # Header
-        header = tk.Frame(self, bg=BG_DARK)
-        header.pack(fill="x", pady=(32, 0))
-        tk.Label(header, text="Finishing Tool", font=("SF Pro Display", 26, "bold"),
-                 bg=BG_DARK, fg=ACCENT).pack()
-        tk.Label(header, text="v1.0 Installer", font=("SF Pro Display", 13),
+        tk.Label(self, text="Finishing Tool", font=("SF Pro Display", 26, "bold"),
+                 bg=BG_DARK, fg=ACCENT).pack(pady=(32, 0))
+        tk.Label(self, text="Installer", font=("SF Pro Display", 13),
                  bg=BG_DARK, fg=TEXT_MUTED).pack(pady=(2, 0))
 
         tk.Frame(self, bg="#2a2a2a", height=1).pack(fill="x", padx=40, pady=24)
 
-        # Steps
         self._step_icons  = []
         self._step_labels = []
         steps_frame = tk.Frame(self, bg=BG_DARK)
@@ -61,39 +90,34 @@ class InstallerApp(tk.Tk):
 
         tk.Frame(self, bg="#2a2a2a", height=1).pack(fill="x", padx=40, pady=20)
 
-        # Progress bar
         pb_frame = tk.Frame(self, bg=BG_DARK)
         pb_frame.pack(fill="x", padx=40)
         self._pb = tk.Canvas(pb_frame, height=8, bg="#2a2a2a", highlightthickness=0)
         self._pb.pack(fill="x")
 
-        # Status
         self._status = tk.StringVar(value="Ready to install.")
         tk.Label(self, textvariable=self._status, font=("SF Pro Display", 11),
                  bg=BG_DARK, fg=TEXT_MUTED).pack(pady=(10, 0))
 
-        # Log
         log_frame = tk.Frame(self, bg=BG_DARK)
         log_frame.pack(fill="both", expand=True, padx=40, pady=10)
         self._log_box = tk.Text(log_frame, font=("SF Mono", 10), bg="#111111",
-                                fg=TEXT_MUTED, relief="flat", bd=0, height=5,
+                                fg=TEXT_MUTED, relief="flat", bd=0, height=6,
                                 state="disabled", wrap="word")
         self._log_box.pack(fill="both", expand=True)
 
-        # Install button
-        self._install_btn = tk.Button(self, text="Install",
-                                      font=("SF Pro Display", 14, "bold"),
-                                      bg=ACCENT, fg="#000000",
-                                      relief="flat", bd=0, padx=24, pady=10,
-                                      cursor="", command=self._start_install)
-        self._install_btn.pack(pady=16)
+        btn_frame = tk.Frame(self, bg=BG_DARK)
+        btn_frame.pack(pady=20)
+        self._install_btn = _rounded_btn(btn_frame, "Install", self._start_install,
+                                          width=160, height=36)
+        self._install_btn.pack()
 
-        # Launch button (hidden until done)
-        self._launch_btn = tk.Button(self, text="Launch Finishing Tool",
-                                     font=("SF Pro Display", 14, "bold"),
-                                     bg=SUCCESS, fg="#000000",
-                                     relief="flat", bd=0, padx=24, pady=10,
-                                     cursor="", command=self._launch_app)
+        self._launch_frame = tk.Frame(self, bg=BG_DARK)
+        self._launch_btn = _rounded_btn(self._launch_frame, "Launch Finishing Tool",
+                                         self._launch_app, bg=SUCCESS, fg="#000000",
+                                         width=220, height=36,
+                                         hover="#6fcf6f", press="#2d8a2d")
+        self._launch_btn.pack()
 
     def _log(self, msg):
         def _do():
@@ -126,278 +150,176 @@ class InstallerApp(tk.Tk):
     def _set_status(self, msg):
         self.after(0, lambda: self._status.set(msg))
 
-    def _run(self, cmd, env=None):
-        e = os.environ.copy()
-        if env:
-            e.update(env)
-        result = subprocess.run(cmd, capture_output=True, text=True, env=e)
-        if result.stdout.strip(): self._log(result.stdout.strip())
-        if result.stderr.strip(): self._log(result.stderr.strip())
-        return result
-
-    def _ask_admin_credentials(self):
-        """Show a modal dialog asking for admin username and password."""
-        import getpass
-        result = {"ok": False, "user": "", "pwd": ""}
-        dialog = tk.Toplevel(self)
-        dialog.title("Administrator Required")
-        dialog.configure(bg=BG_DARK)
-        dialog.resizable(False, False)
-        dialog.geometry("380x280")
-        dialog.transient(self)
-        dialog.grab_set()
-
-        tk.Label(dialog, text="Administrator Required",
-                 font=("SF Pro Display", 15, "bold"),
-                 bg=BG_DARK, fg=TEXT).pack(pady=(24, 4))
-        tk.Label(dialog, text="Homebrew requires an administrator account to install.",
-                 font=("SF Pro Display", 11), bg=BG_DARK, fg=TEXT_MUTED,
-                 wraplength=320).pack(pady=(0, 20))
-
-        form = tk.Frame(dialog, bg=BG_DARK)
-        form.pack(padx=32, fill="x")
-
-        tk.Label(form, text="Username", font=("SF Pro Display", 11),
-                 bg=BG_DARK, fg=TEXT_MUTED, anchor="w").pack(fill="x")
-        user_var = tk.StringVar(value=getpass.getuser())
-        user_entry = tk.Entry(form, textvariable=user_var,
-                              font=("SF Pro Display", 12), bg="#2a2a2a",
-                              fg=TEXT, relief="flat", bd=0,
-                              insertbackground=TEXT)
-        user_entry.pack(fill="x", ipady=6, pady=(2, 12))
-
-        tk.Label(form, text="Password", font=("SF Pro Display", 11),
-                 bg=BG_DARK, fg=TEXT_MUTED, anchor="w").pack(fill="x")
-        pwd_var = tk.StringVar()
-        pwd_entry = tk.Entry(form, textvariable=pwd_var, show="●",
-                             font=("SF Pro Display", 12), bg="#2a2a2a",
-                             fg=TEXT, relief="flat", bd=0,
-                             insertbackground=TEXT)
-        pwd_entry.pack(fill="x", ipady=6, pady=(2, 0))
-        pwd_entry.focus()
-
-        btn_row = tk.Frame(dialog, bg=BG_DARK)
-        btn_row.pack(pady=20)
-
-        def _cancel():
-            dialog.destroy()
-
-        def _ok():
-            result["ok"] = True
-            result["user"] = user_var.get().strip()
-            result["pwd"] = pwd_var.get()
-            dialog.destroy()
-
-        tk.Button(btn_row, text="Cancel", font=("SF Pro Display", 12),
-                  bg="#2a2a2a", fg=TEXT_MUTED, relief="flat", bd=0,
-                  padx=16, pady=6, command=_cancel).pack(side="left", padx=8)
-        tk.Button(btn_row, text="OK", font=("SF Pro Display", 12, "bold"),
-                  bg=ACCENT, fg="#000000", relief="flat", bd=0,
-                  padx=16, pady=6, command=_ok).pack(side="left", padx=8)
-
-        pwd_entry.bind("<Return>", lambda e: _ok())
-        self.wait_window(dialog)
-        return (result["user"], result["pwd"]) if result["ok"] else None
-
     def _start_install(self):
-        self._install_btn.config(state="disabled", bg="#555555", fg="#888888")
+        self._install_btn._bg = "#555555"
+        self._install_btn._draw("#555555")
+        self._install_btn.unbind("<Enter>")
+        self._install_btn.unbind("<Leave>")
+        self._install_btn.unbind("<ButtonPress-1>")
+        self._install_btn.unbind("<ButtonRelease-1>")
         self._set_status("Installing...")
         threading.Thread(target=self._install, daemon=True).start()
 
     def _install(self):
         try:
             total = len(STEPS)
+            env = os.environ.copy()
+            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + env.get("PATH", "")
 
-            # Step 0: Python
+            # Step 0: Homebrew
             self._set_step(0, "active")
-            v = sys.version_info
-            if v.major < 3 or (v.major == 3 and v.minor < 10):
-                self._set_step(0, "error")
-                self._set_status("Python 3.10+ required. Install from python.org.")
-                return
-            self._log(f"Python {v.major}.{v.minor}.{v.micro} ✓")
-            self._set_step(0, "done")
-            self._set_progress(1/total)
-
-            # Step 1: Homebrew
-            self._set_step(1, "active")
-            # Search common locations
+            self._set_status("Checking Homebrew...")
             brew = (shutil.which("brew") or
                     "/opt/homebrew/bin/brew" if os.path.exists("/opt/homebrew/bin/brew") else
                     "/usr/local/bin/brew" if os.path.exists("/usr/local/bin/brew") else None)
             if not brew or not os.path.exists(brew):
                 self._log("Homebrew not found — installing...")
-                self._set_status("Installing Homebrew — you may be asked for your password in Terminal...")
-                # Use osascript to run with admin privileges in a visible Terminal window
-                script = (
-                    'tell application "Terminal"\n'
-                    '  activate\n'
-                    '  do script "NONINTERACTIVE=1 /bin/bash -c \\"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\\""\n'
-                    'end tell'
+                self._set_status("Installing Homebrew...")
+                import getpass
+                default_user = getpass.getuser()
+                user_script = (
+                    f'set uname to text returned of (display dialog '
+                    f'"Finishing Tool needs admin access to install Homebrew.\\nAdmin username:" '
+                    f'default answer "{default_user}" with title "Finishing Tool Installer" '
+                    f'buttons {{"Cancel","Next"}} default button "Next")'
                 )
-                subprocess.run(["osascript", "-e", script])
-                # Wait for brew to appear
-                import time
-                for _ in range(120):
-                    time.sleep(2)
-                    brew = (shutil.which("brew") or
-                            "/opt/homebrew/bin/brew" if os.path.exists("/opt/homebrew/bin/brew") else
-                            "/usr/local/bin/brew" if os.path.exists("/usr/local/bin/brew") else None)
-                    if brew and os.path.exists(brew):
-                        break
-                if not brew or not os.path.exists(brew):
-                    self._set_step(1, "error")
-                    self._set_status("Homebrew install failed or timed out.")
+                user_result = subprocess.run(["osascript", "-e", user_script],
+                                             capture_output=True, text=True)
+                if user_result.returncode != 0:
+                    self._set_step(0, "error")
+                    self._set_status("Cancelled.")
                     return
-            self._log(f"Homebrew found ✓")
-            self._set_step(1, "done")
-            self._set_progress(2/total)
+                username = user_result.stdout.strip()
+                pw_script = (
+                    f'set pwd to text returned of (display dialog '
+                    f'"Password for \\"{username}\\":" '
+                    f'default answer "" with hidden answer '
+                    f'with title "Finishing Tool Installer" '
+                    f'buttons {{"Cancel","Install"}} default button "Install")'
+                )
+                pw_result = subprocess.run(["osascript", "-e", pw_script],
+                                           capture_output=True, text=True)
+                if pw_result.returncode != 0:
+                    self._set_step(0, "error")
+                    self._set_status("Cancelled.")
+                    return
+                password = pw_result.stdout.strip()
+                install_cmd = ('NONINTERACTIVE=1 /bin/bash -c '
+                               '"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"')
+                proc = subprocess.Popen(
+                    ["sudo", "-S", "-u", username, "/bin/bash", "-c", install_cmd],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, text=True)
+                proc.stdin.write(password + "\n")
+                proc.stdin.flush()
+                proc.stdin.close()
+                for line in proc.stdout:
+                    self._log(line.rstrip())
+                proc.wait()
+                brew = ("/opt/homebrew/bin/brew" if os.path.exists("/opt/homebrew/bin/brew")
+                        else "/usr/local/bin/brew" if os.path.exists("/usr/local/bin/brew")
+                        else shutil.which("brew"))
+                if not brew:
+                    self._set_step(0, "error")
+                    self._set_status("Homebrew install failed.")
+                    return
+            else:
+                self._log("Homebrew found ✓")
+            self._set_step(0, "done")
+            self._set_progress(1/total)
 
-            # Step 2: Tesseract
-            self._set_step(2, "active")
+            # Step 1: Tesseract
+            self._set_step(1, "active")
+            self._set_status("Checking Tesseract...")
             tess = shutil.which("tesseract") or "/opt/homebrew/bin/tesseract"
             if not os.path.exists(tess):
-                self._log("Installing tesseract...")
-                env = {"PATH": "/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", "")}
-                r = self._run([brew, "install", "tesseract"], env=env)
+                self._log("Installing Tesseract OCR...")
+                r = subprocess.run([brew, "install", "tesseract"],
+                                   capture_output=True, text=True, env=env)
                 if r.returncode != 0:
-                    self._set_step(2, "error")
+                    self._set_step(1, "error")
                     self._set_status("Tesseract install failed.")
                     return
             else:
-                self._log(f"Tesseract found ✓")
+                self._log("Tesseract found ✓")
+            self._set_step(1, "done")
+            self._set_progress(2/total)
+
+            # Step 2: Download all source files from GitHub
+            self._set_step(2, "active")
+            self._set_status("Downloading source files...")
+            import urllib.request, ssl
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+
+            build_dir = os.path.expanduser("~/Applications/FinishingToolBuild")
+            os.makedirs(build_dir, exist_ok=True)
+
+            for fname in FILES:
+                url = f"{GITHUB_BASE}/{fname}"
+                dst = os.path.join(build_dir, fname)
+                self._log(f"  Downloading {fname}...")
+                try:
+                    req = urllib.request.urlopen(url, context=ctx, timeout=30)
+                    with open(dst, "wb") as f:
+                        f.write(req.read())
+                except Exception as e:
+                    self._set_step(2, "error")
+                    self._set_status(f"Download failed: {fname}")
+                    self._log(f"  ✗ {e}")
+                    return
+            self._log("All files downloaded ✓")
             self._set_step(2, "done")
             self._set_progress(3/total)
 
-            # Step 3: pip packages
+            # Step 3: Run build_and_install.sh
             self._set_step(3, "active")
-            # Find real Python — not the PyInstaller bundle
-            python = (shutil.which("python3") or
-                      "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3" if
-                      os.path.exists("/Library/Frameworks/Python.framework/Versions/3.13/bin/python3")
-                      else shutil.which("python"))
-            if not python:
+            self._set_status("Building app — this may take a few minutes...")
+            self._log("Running build script...")
+
+            build_script = os.path.join(build_dir, "build_and_install.sh")
+            os.chmod(build_script, 0o755)
+
+            proc = subprocess.Popen(
+                ["/bin/bash", build_script],
+                cwd=build_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=env
+            )
+            for line in proc.stdout:
+                self._log(line.rstrip())
+            proc.wait()
+
+            if proc.returncode != 0:
                 self._set_step(3, "error")
-                self._set_status("Could not find Python. Please install from python.org.")
+                self._set_status("Build failed — check log.")
                 return
-            self._log(f"Using Python: {python}")
-            for pkg in PIP_PACKAGES:
-                self._log(f"Installing {pkg}...")
-                r = self._run([python, "-m", "pip", "install",
-                               pkg, "--break-system-packages", "-q"])
-                if r.returncode != 0:
-                    self._set_step(3, "error")
-                    self._set_status(f"Failed to install {pkg}.")
-                    return
-            self._log("All packages installed ✓")
+
+            app_bundle = "/Applications/Finishing Tool.app"
+            if not os.path.exists(app_bundle):
+                self._set_step(3, "error")
+                self._set_status("App not found after build.")
+                return
+
+            self._log("Finishing Tool installed ✓")
             self._set_step(3, "done")
-            self._set_progress(4/total)
-
-            # Step 4: Install app
-            self._set_step(4, "active")
-
-            # Find source files — inside PyInstaller bundle or next to script
-            if getattr(sys, 'frozen', False):
-                src_dir = sys._MEIPASS
-            else:
-                src_dir = os.path.dirname(os.path.abspath(__file__))
-            self._log(f"Source dir: {src_dir}")
-            self._log(f"Files there: {os.listdir(src_dir)}")
-
-            # Install location
-            app_dir = os.path.expanduser("~/Applications/FinishingTool")
-            os.makedirs(app_dir, exist_ok=True)
-            self._log(f"App dir: {app_dir}")
-
-            # Copy files
-            for fname in ["main.py", "thinking.gif", "icon.png"]:
-                src = os.path.join(src_dir, fname)
-                dst = os.path.join(app_dir, fname)
-                if os.path.exists(src):
-                    shutil.copy2(src, dst)
-                    self._log(f"  Copied {fname} ✓")
-                else:
-                    self._log(f"  ⚠ {fname} not found at {src}")
-
-            # Verify main.py copied
-            main_path = os.path.join(app_dir, "main.py")
-            if not os.path.exists(main_path):
-                self._set_step(4, "error")
-                self._set_status("Failed to copy app files.")
-                return
-
-            # Build .app bundle
-            app_bundle = os.path.expanduser("~/Applications/Finishing Tool.app")
-            macos_dir  = os.path.join(app_bundle, "Contents", "MacOS")
-            res_dir    = os.path.join(app_bundle, "Contents", "Resources")
-            os.makedirs(macos_dir, exist_ok=True)
-            os.makedirs(res_dir, exist_ok=True)
-
-            # Launcher
-            launcher = os.path.join(macos_dir, "FinishingTool")
-            with open(launcher, "w") as f:
-                f.write("#!/bin/bash\n")
-                f.write('export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"\n')
-                f.write(f'cd "{app_dir}"\n')
-                f.write(f'exec "{python}" "{main_path}"\n')
-            os.chmod(launcher, 0o755)
-            self._log(f"  Launcher: {launcher} ✓")
-
-            # Info.plist
-            plist = "\n".join([
-                '<?xml version="1.0" encoding="UTF-8"?>',
-                '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
-                '<plist version="1.0"><dict>',
-                '<key>CFBundleName</key><string>Finishing Tool</string>',
-                '<key>CFBundleDisplayName</key><string>Finishing Tool</string>',
-                '<key>CFBundleIdentifier</key><string>com.finishingtool.app</string>',
-                '<key>CFBundleVersion</key><string>1.0</string>',
-                '<key>CFBundleExecutable</key><string>FinishingTool</string>',
-                '<key>NSHighResolutionCapable</key><true/>',
-                '</dict></plist>',
-            ])
-            with open(os.path.join(app_bundle, "Contents", "Info.plist"), "w") as f:
-                f.write(plist)
-
-            # Icon
-            icon_src = os.path.join(src_dir, "icon.png")
-            if os.path.exists(icon_src):
-                shutil.copy2(icon_src, os.path.join(res_dir, "icon.png"))
-                iconset = os.path.join(res_dir, "icon.iconset")
-                os.makedirs(iconset, exist_ok=True)
-                for size in [16, 32, 64, 128, 256, 512]:
-                    subprocess.run(["sips", "-z", str(size), str(size),
-                                    icon_src, "--out",
-                                    os.path.join(iconset, f"icon_{size}x{size}.png")],
-                                   capture_output=True)
-                subprocess.run(["iconutil", "-c", "icns", iconset,
-                                "-o", os.path.join(res_dir, "icon.icns")],
-                               capture_output=True)
-                shutil.rmtree(iconset, ignore_errors=True)
-                self._log("  Icon ✓")
-
-            self._log(f"Installed: {app_bundle} ✓")
-            self._set_step(4, "done")
             self._set_progress(1.0)
             self._set_status("Installation complete!")
-            self.after(0, lambda b=app_bundle: self._show_done(b))
+            self.after(0, self._show_done)
 
         except Exception as e:
             self._log(f"Error: {e}")
             self._set_status(f"Installation failed: {e}")
 
-    def _show_done(self, app_bundle):
-        self._app_bundle = app_bundle
+    def _show_done(self):
         self._install_btn.pack_forget()
-        self._launch_btn.pack(pady=16)
+        self._launch_frame.pack(pady=20)
 
     def _launch_app(self):
-        bundle = getattr(self, '_app_bundle',
-                         '/Applications/Finishing Tool.app')
-        self._log(f"Opening {bundle}...")
-        result = subprocess.run(["open", bundle], capture_output=True, text=True)
-        if result.returncode != 0:
-            self._log(f"✗ Could not open: {result.stderr}")
+        subprocess.run(["open", "/Applications/Finishing Tool.app"], capture_output=True)
         self.after(2000, self.destroy)
 
 
