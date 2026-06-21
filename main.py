@@ -1639,10 +1639,13 @@ class VFXExporterApp(tk.Tk):
         self.btn_toggle_all.bind("<ButtonPress-1>",   lambda e: self.btn_toggle_all.config(bg=btn_prs))
         self.btn_toggle_all.bind("<ButtonRelease-1>", lambda e: (self.btn_toggle_all.config(bg=btn_hov), self._toggle_all_episodes()))
         self._all_disabled = False
-        ep_outer = tk.Frame(main, bg="#252525", padx=12, pady=12)
-        ep_outer.pack(fill="x", pady=(0, 8))
-        self.ep_tags_frame = tk.Frame(ep_outer, bg="#252525")
-        self.ep_tags_frame.pack(fill="x")
+        self.ep_outer = tk.Frame(main, bg="#252525", padx=12, pady=0)
+        self.ep_outer.pack(fill="x", pady=(0, 8))
+        self.ep_tags_frame = tk.Frame(self.ep_outer, bg="#252525")
+        self.ep_tags_frame.pack(fill="x", pady=12)
+        # Zero-sized permanent placeholder — forces ep_tags_frame to shrink to nothing
+        # when all episode tags are removed (tkinter bug: frame stays at last child's size)
+        tk.Frame(self.ep_tags_frame, bg="#252525", width=0, height=0).pack()
         self._ep_tag_widgets = []
 
         # Initialize all mode states properly
@@ -2835,11 +2838,6 @@ class VFXExporterApp(tk.Tk):
         self._export_started = False
         if hasattr(self, '_show_pill'):
             self._update_show_pill("")
-        # Resize window back to natural height after clearing episode tags
-        def _resize_after_reset():
-            self.update_idletasks()
-            self.geometry(f"950x{self.winfo_reqheight()}")
-        self.after(100, _resize_after_reset)
         self._all_disabled = False
         self.btn_toggle_all.config(text="DISABLE ALL", bg=BG_INPUT, fg=TEXT_PRIMARY)
         self._disabled_episodes.clear()
@@ -2872,11 +2870,13 @@ class VFXExporterApp(tk.Tk):
         self.log_box.delete("1.0", "end")
         self.log_box.config(state="disabled")
 
-        # Clear episode tags
+        # Clear episode tags — repack ep_tags_frame so it collapses to nothing
         for w in self._ep_tag_widgets:
             try: w.destroy()
             except: pass
         self._ep_tag_widgets.clear()
+        self.ep_tags_frame.pack_forget()
+        self.ep_tags_frame.pack(fill="x", pady=12)
 
         # Reset plates count
         self.plates_count_label.config(text="—")
@@ -2898,6 +2898,10 @@ class VFXExporterApp(tk.Tk):
         self.btn_reset._draw("#2a2a2a")  # show greyed out
 
         self._log("Reset. Ready to connect.", "success")
+
+        # Resize window after all widgets are cleared
+        self.update_idletasks()
+        self.geometry(f"950x{self.winfo_reqheight()}")
 
     def _do_connect(self):
         self._enable_reset_btn()
