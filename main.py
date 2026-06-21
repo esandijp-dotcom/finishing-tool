@@ -2352,17 +2352,27 @@ class VFXExporterApp(tk.Tk):
             resources_dir = os.path.dirname(script_path)
             vpath = os.path.join(resources_dir, "version.json")
 
-            # Download version.json — same path resolution as main.py
-            vreq = urllib.request.urlopen(VERSION_URL, context=ctx, timeout=30)
-            with open(vpath, "wb") as f:
-                f.write(vreq.read())
-            self._log(f"  version.json saved ✓", "muted")
+            self._log(f"  script_path: {script_path}", "muted")
+            self._log(f"  vpath: {vpath}", "muted")
+
+            # Download version.json
+            try:
+                vreq = urllib.request.urlopen(VERSION_URL, context=ctx, timeout=30)
+                vdata = vreq.read()
+                with open(vpath, "wb") as f:
+                    f.write(vdata)
+                self._log(f"  version.json saved: {vdata.decode()[:50]}", "muted")
+            except Exception as ve:
+                self._log(f"  version.json FAILED: {ve}", "error")
 
             # Download main.py
-            req = urllib.request.urlopen(download_url, context=ctx, timeout=30)
-            with open(script_path, "wb") as f:
-                f.write(req.read())
-            self._log(f"  main.py saved ✓", "muted")
+            try:
+                req = urllib.request.urlopen(download_url, context=ctx, timeout=30)
+                with open(script_path, "wb") as f:
+                    f.write(req.read())
+                self._log(f"  main.py saved ✓", "muted")
+            except Exception as me:
+                self._log(f"  main.py FAILED: {me}", "error")
             self._log(f"✓ Updated to v{remote_version}. Restarting...", "success")
             # Find the .app bundle by walking up from script_path
             path = os.path.abspath(script_path)
