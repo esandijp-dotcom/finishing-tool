@@ -2275,14 +2275,19 @@ class VFXExporterApp(tk.Tk):
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
                 req = urllib.request.urlopen(VERSION_URL, context=ctx, timeout=10)
-                data = json.loads(req.read().decode())
+                raw = req.read().decode()
+                print(f"Version check response: {raw}", flush=True)
+                data = json.loads(raw)
                 remote = data.get("version", "0")
                 notes  = data.get("release_notes", "")
+                print(f"Remote: {remote}, Local: {APP_VERSION}", flush=True)
                 def _parse(v):
                     try: return tuple(int(x) for x in v.split("."))
                     except: return (0,)
                 if _parse(remote) > _parse(APP_VERSION):
                     self.after(0, lambda: self._show_update_banner(remote, notes, data.get("download_url", DOWNLOAD_URL)))
+                else:
+                    print(f"No update needed ({remote} <= {APP_VERSION})", flush=True)
             except Exception as e:
                 print(f"Update check failed: {e}", flush=True)
         threading.Thread(target=task, daemon=True).start()
