@@ -1290,14 +1290,13 @@ class VFXExporterApp(tk.Tk):
         self.update_idletasks()
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
-        w = self.winfo_reqwidth()
+        w = 950
         h = self.winfo_reqheight()
-        if w < 100:
-            w, h = 900, 800
+        if h < 100:
+            h = 800
         x = (sw - w) // 2
         y = (sh - h) // 2
-        # Only set position, not size — so log box can expand window height freely
-        self.geometry(f"+{x}+{y}")
+        self.geometry(f"{w}x{h}+{x}+{y}")
         self.deiconify()
         self.attributes("-alpha", 1)
         self.lift()
@@ -1622,12 +1621,18 @@ class VFXExporterApp(tk.Tk):
         ep_header.pack(fill="x", pady=(12, 0))
         tk.Label(ep_header, text="DETECTED EPISODES",
                  font=("SF Pro Display", 10, "bold"), bg=BG_DARK, fg=TEXT_MUTED).pack(side="left")
+        btn_bg  = BG_INPUT
+        btn_hov = "#3a3a3a"
+        btn_prs = "#1a1a1a"
         self.btn_toggle_all = tk.Label(ep_header, text="DISABLE ALL",
                                         font=("SF Pro Display", 10, "bold"),
-                                        bg=BG_INPUT, fg=TEXT_PRIMARY,
-                                        padx=10, pady=3, cursor="")
+                                        bg=btn_bg, fg=TEXT_PRIMARY,
+                                        padx=10, pady=3)
         self.btn_toggle_all.pack(side="right")
-        self.btn_toggle_all.bind("<Button-1>", lambda e: self._toggle_all_episodes())
+        self.btn_toggle_all.bind("<Enter>",           lambda e: self.btn_toggle_all.config(bg=btn_hov))
+        self.btn_toggle_all.bind("<Leave>",           lambda e: self.btn_toggle_all.config(bg=btn_bg))
+        self.btn_toggle_all.bind("<ButtonPress-1>",   lambda e: self.btn_toggle_all.config(bg=btn_prs))
+        self.btn_toggle_all.bind("<ButtonRelease-1>", lambda e: (self.btn_toggle_all.config(bg=btn_hov), self._toggle_all_episodes()))
         self._all_disabled = False
         ep_outer = tk.Frame(main, bg="#252525", padx=12, pady=12)
         ep_outer.pack(fill="x", pady=(0, 8))
@@ -1971,14 +1976,14 @@ class VFXExporterApp(tk.Tk):
             self._log_visible = False
             self.update_idletasks()
             self.resizable(False, False)
-            self.geometry(f"{self.winfo_width()}x{self.winfo_reqheight()}")
+            self.geometry(f"950x{self.winfo_reqheight()}")
         else:
             self.resizable(False, True)
             self.log_frame_outer.pack(fill="both", expand=True)
             self.btn_log_toggle.config(text="HIDE LOG")
             self._log_visible = True
             self.update_idletasks()
-            self.geometry(f"{self.winfo_width()}x{self.winfo_reqheight()}")
+            self.geometry(f"950x{self.winfo_reqheight()}")
             self.resizable(False, False)
 
     def _set_step_done(self, step_index):
@@ -3134,7 +3139,12 @@ class VFXExporterApp(tk.Tk):
                 tag.bind("<ButtonRelease-1>", _on_click)
                 self._ep_tag_widgets.append(tag)
 
-        self.after(0, _do)
+        def _do_and_resize():
+            _do()
+            self.update_idletasks()
+            h = self.winfo_reqheight()
+            self.geometry(f"950x{h}")
+        self.after(0, _do_and_resize)
 
     def _toggle_all_episodes(self):
         """Toggle all episodes on or off."""
