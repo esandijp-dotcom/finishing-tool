@@ -153,6 +153,31 @@ class InstallerApp(tk.Tk):
             self._pb.create_rectangle(0, 0, int(w * pct), 8, fill=ACCENT, outline="")
         self.after(0, _do)
 
+    def _step_progress(self, step_done):
+        """Step 0=10%, step 1=10%, step 2=15%, step 3=65%"""
+        milestones = [0.0, 0.10, 0.20, 0.35, 1.0]
+        self._set_progress(milestones[step_done])
+
+    def _start_build_progress(self):
+        """Increment progress every 10 seconds during build, cap at 95% until done."""
+        self._build_progress_running = True
+        self._build_pct = 0.35  # start at 35%
+        self._set_progress(self._build_pct)
+        self._tick_build_progress()
+
+    def _tick_build_progress(self):
+        if not getattr(self, '_build_progress_running', False):
+            return
+        # Add 5% every 10 seconds, cap at 95%
+        new_pct = min(self._build_pct + 0.05, 0.95)
+        self._build_pct = new_pct
+        self._set_progress(new_pct)
+        if new_pct < 0.95:
+            self.after(10000, self._tick_build_progress)
+
+    def _stop_build_progress(self):
+        self._build_progress_running = False
+
     def _set_step(self, i, state):
         def _do():
             if state == "active":
@@ -245,7 +270,7 @@ class InstallerApp(tk.Tk):
             else:
                 self._log("Homebrew found ✓")
             self._set_step(0, "done")
-            self._set_progress(1/total)
+            self._step_progress(1)
 
             # Step 1: Tesseract
             self._set_step(1, "active")
@@ -262,7 +287,7 @@ class InstallerApp(tk.Tk):
             else:
                 self._log("Tesseract found ✓")
             self._set_step(1, "done")
-            self._set_progress(2/total)
+            self._step_progress(2)
 
             # Step 2: Download all source files from GitHub
             self._set_step(2, "active")
@@ -326,7 +351,7 @@ class InstallerApp(tk.Tk):
             self._log("Render presets installed ✓")
 
             self._set_step(2, "done")
-            self._set_progress(3/total)
+            self._step_progress(3)
 
             # Step 3: Run build_and_install.sh
             self._set_step(3, "active")
@@ -350,12 +375,15 @@ class InstallerApp(tk.Tk):
                 bufsize=1,
                 env=build_env
             )
+            # Timed progress — starts at 35%, adds 5% every 10s, caps at 95%
+            self.after(0, self._start_build_progress)
             for line in iter(proc.stdout.readline, ""):
                 stripped = line.rstrip()
                 if stripped:
                     self._log(stripped)
             proc.stdout.close()
             proc.wait()
+            self._stop_build_progress()
 
             if proc.returncode != 0:
                 self._set_step(3, "error")
@@ -370,7 +398,7 @@ class InstallerApp(tk.Tk):
 
             self._log("Finishing Tool installed ✓")
             self._set_step(3, "done")
-            self._set_progress(1.0)
+            self._step_progress(4)
             self._set_status("Installation complete!")
             self.after(0, self._show_done)
 
