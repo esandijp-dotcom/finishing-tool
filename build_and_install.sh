@@ -90,26 +90,17 @@ else
     echo "⚠️  No icon found (non-fatal)"
 fi
 
-# ── Build .app with py2app (skip if main.py unchanged) ───────────────────────
+# ── Build .app with py2app ───────────────────────────────────────────────────
 cd "$SCRIPT_DIR"
-HASH_FILE="$SCRIPT_DIR/.last_build_hash"
-CURRENT_HASH=$(md5 -q main.py 2>/dev/null || md5sum main.py 2>/dev/null | awk '{print $1}')
-LAST_HASH=$(cat "$HASH_FILE" 2>/dev/null || echo "")
-
-if [ "$CURRENT_HASH" = "$LAST_HASH" ] && [ -d "dist/${APP_NAME}.app" ]; then
-    echo "✓ main.py unchanged — skipping rebuild (using existing build)"
-else
-    echo "→ Building .app bundle..."
-    rm -rf build dist
-    "$VENV_DIR/bin/python3" setup.py py2app 2>&1
-    if [ ! -d "dist/${APP_NAME}.app" ]; then
-        echo ""
-        echo "✗ Build failed — dist/${APP_NAME}.app not found."
-        exit 1
-    fi
-    echo "$CURRENT_HASH" > "$HASH_FILE"
-    echo "✓ App built"
+echo "→ Building .app bundle..."
+rm -rf build dist
+"$VENV_DIR/bin/python3" setup.py py2app 2>&1
+if [ ! -d "dist/${APP_NAME}.app" ]; then
+    echo ""
+    echo "✗ Build failed — dist/${APP_NAME}.app not found."
+    exit 1
 fi
+echo "✓ App built"
 
 # ── Install to /Applications ──────────────────────────────────────────────────
 echo "→ Installing to /Applications..."
