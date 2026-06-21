@@ -44,22 +44,33 @@ fi
 
 # ── Virtual environment ───────────────────────────────────────────────────────
 VENV_DIR="$SCRIPT_DIR/.venv"
-echo "→ Setting up virtual environment..."
-rm -rf "$VENV_DIR"
-$PYTHON -m venv "$VENV_DIR"
+PACKAGES="opencv-python pytesseract pillow openpyxl xlsxwriter numpy py2app"
 
-echo "→ Installing Python packages..."
-"$VENV_DIR/bin/python3" -m pip install --quiet --upgrade pip
-"$VENV_DIR/bin/python3" -m pip install --quiet \
-    opencv-python \
-    pytesseract \
-    pillow \
-    openpyxl \
-    xlsxwriter \
-    numpy \
-    py2app
-
-echo "✓ Python packages installed"
+if [ ! -d "$VENV_DIR" ]; then
+    echo "→ Creating virtual environment..."
+    $PYTHON -m venv "$VENV_DIR"
+    echo "→ Installing Python packages..."
+    "$VENV_DIR/bin/python3" -m pip install --quiet --upgrade pip
+    "$VENV_DIR/bin/python3" -m pip install --quiet $PACKAGES
+    echo "✓ Python packages installed"
+else
+    echo "✓ Virtual environment (existing)"
+    # Only install missing packages
+    MISSING=$("$VENV_DIR/bin/python3" -c "
+import importlib, sys
+pkgs = {'opencv-python':'cv2','pytesseract':'pytesseract','pillow':'PIL',
+        'openpyxl':'openpyxl','xlsxwriter':'xlsxwriter','numpy':'numpy','py2app':'py2app'}
+missing = [k for k,v in pkgs.items() if importlib.util.find_spec(v) is None]
+print(' '.join(missing))
+" 2>/dev/null)
+    if [ -n "$MISSING" ]; then
+        echo "→ Installing missing packages: $MISSING"
+        "$VENV_DIR/bin/python3" -m pip install --quiet $MISSING
+        echo "✓ Packages installed"
+    else
+        echo "✓ All packages present"
+    fi
+fi
 
 # ── DaVinci Resolve scripting check ──────────────────────────────────────────
 RESOLVE_MODULES="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Modules"
@@ -87,20 +98,26 @@ else
     echo "⚠️  No icon found (non-fatal)"
 fi
 
-# ── Build .app with py2app ────────────────────────────────────────────────────
-echo "→ Building .app bundle..."
+# ── Build .app with py2app (skip if main.py unchanged) ───────────────────────
 cd "$SCRIPT_DIR"
-rm -rf build dist
+HASH_FILE="$SCRIPT_DIR/.last_build_hash"
+CURRENT_HASH=$(md5 -q main.py 2>/dev/null || md5sum main.py | awk '{print $1}')
+LAST_HASH=$(cat "$HASH_FILE" 2>/dev/null || echo "")
 
-"$VENV_DIR/bin/python3" setup.py py2app 2>&1
-
-if [ ! -d "dist/${APP_NAME}.app" ]; then
-    echo ""
-    echo "✗ Build failed — dist/${APP_NAME}.app not found."
-    exit 1
+if [ "$CURRENT_HASH" = "$LAST_HASH" ] && [ -d "dist/${APP_NAME}.app" ]; then
+    echo "✓ main.py unchanged — skipping rebuild (using existing build)"
+else
+    echo "→ Building .app bundle..."
+    rm -rf build dist
+    "$VENV_DIR/bin/python3" setup.py py2app 2>&1
+    if [ ! -d "dist/${APP_NAME}.app" ]; then
+        echo ""
+        echo "✗ Build failed — dist/${APP_NAME}.app not found."
+        exit 1
+    fi
+    echo "$CURRENT_HASH" > "$HASH_FILE"
+    echo "✓ App built"
 fi
-
-echo "✓ App built"
 
 # ── Install to /Applications ──────────────────────────────────────────────────
 echo "→ Installing to /Applications..."
@@ -113,5 +130,4 @@ echo "╔═══════════════════════�
 echo "║              All done!                       ║"
 echo "╚══════════════════════════════════════════════╝"
 echo ""
-
 echo "✓ Finishing Tool installed successfully."
