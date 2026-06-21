@@ -44,33 +44,25 @@ fi
 
 # ── Virtual environment ───────────────────────────────────────────────────────
 VENV_DIR="$SCRIPT_DIR/.venv"
-PACKAGES="opencv-python pytesseract pillow openpyxl xlsxwriter numpy py2app"
 
 if [ ! -d "$VENV_DIR" ]; then
     echo "→ Creating virtual environment..."
     $PYTHON -m venv "$VENV_DIR"
-    echo "→ Installing Python packages..."
-    "$VENV_DIR/bin/python3" -m pip install --quiet --upgrade pip
-    "$VENV_DIR/bin/python3" -m pip install --quiet $PACKAGES
-    echo "✓ Python packages installed"
 else
     echo "✓ Virtual environment (existing)"
-    # Only install missing packages
-    MISSING=$("$VENV_DIR/bin/python3" -c "
-import importlib, sys
-pkgs = {'opencv-python':'cv2','pytesseract':'pytesseract','pillow':'PIL',
-        'openpyxl':'openpyxl','xlsxwriter':'xlsxwriter','numpy':'numpy','py2app':'py2app'}
-missing = [k for k,v in pkgs.items() if importlib.util.find_spec(v) is None]
-print(' '.join(missing))
-" 2>/dev/null)
-    if [ -n "$MISSING" ]; then
-        echo "→ Installing missing packages: $MISSING"
-        "$VENV_DIR/bin/python3" -m pip install --quiet $MISSING
-        echo "✓ Packages installed"
-    else
-        echo "✓ All packages present"
-    fi
 fi
+
+echo "→ Installing Python packages..."
+"$VENV_DIR/bin/python3" -m pip install --quiet --upgrade pip
+"$VENV_DIR/bin/python3" -m pip install --quiet \
+    opencv-python \
+    pytesseract \
+    pillow \
+    openpyxl \
+    xlsxwriter \
+    numpy \
+    py2app
+echo "✓ Python packages installed"
 
 # ── DaVinci Resolve scripting check ──────────────────────────────────────────
 RESOLVE_MODULES="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Modules"
@@ -101,7 +93,7 @@ fi
 # ── Build .app with py2app (skip if main.py unchanged) ───────────────────────
 cd "$SCRIPT_DIR"
 HASH_FILE="$SCRIPT_DIR/.last_build_hash"
-CURRENT_HASH=$(md5 -q main.py 2>/dev/null || md5sum main.py | awk '{print $1}')
+CURRENT_HASH=$(md5 -q main.py 2>/dev/null || md5sum main.py 2>/dev/null | awk '{print $1}')
 LAST_HASH=$(cat "$HASH_FILE" 2>/dev/null || echo "")
 
 if [ "$CURRENT_HASH" = "$LAST_HASH" ] && [ -d "dist/${APP_NAME}.app" ]; then
