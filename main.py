@@ -1284,6 +1284,7 @@ class VFXExporterApp(tk.Tk):
         self._check_deps_on_start()
         self.after(2000, self._check_for_updates)
         self.after(1, self._center_window)
+        self.after(100, self._setup_menu)
 
     def _center_window(self):
         self.update_idletasks()
@@ -1356,8 +1357,22 @@ class VFXExporterApp(tk.Tk):
             c._action = lambda: None
             return c
 
+        # ? Help button — filled orange circle
+        help_size = 26
+        self._help_btn = tk.Canvas(title_row, width=help_size, height=help_size,
+                                    bg=BG_OUTER, highlightthickness=0, cursor="")
+        self._help_btn.create_oval(1, 1, help_size-1, help_size-1,
+                                    fill=ACCENT, outline="")
+        self._help_btn.create_text(help_size//2, help_size//2, text="?",
+                                    font=("SF Pro Display", 13, "bold"), fill="#000000")
+        self._help_btn.pack(side="right", padx=(14, 0))
+        self._help_btn.bind("<Enter>",  lambda e: self._help_btn.itemconfig(1, fill="#f0c060"))
+        self._help_btn.bind("<Leave>",  lambda e: self._help_btn.itemconfig(1, fill=ACCENT))
+        self._help_btn.bind("<ButtonPress-1>",   lambda e: self._help_btn.itemconfig(1, fill="#a06010"))
+        self._help_btn.bind("<ButtonRelease-1>", lambda e: (self._help_btn.itemconfig(1, fill=ACCENT), self._open_guide()))
+
         self.btn_reset = _make_reset_canvas("RESET ALL", "#2a6e2a", "#FFFFFF")
-        self.btn_reset.pack(side="right")
+        self.btn_reset.pack(side="right", padx=(0, 0))
         self.btn_reset._action = self._do_reset
         self.btn_reset._enabled = False
 
@@ -1431,7 +1446,7 @@ class VFXExporterApp(tk.Tk):
             _draw_tab(c, label, tab_id == self._active_tab)
             c.bind("<Button-1>", lambda e, tid=tab_id: self._switch_tab(tid))
 
-        _make_tab("VFX Export", "vfx")
+        _make_tab("VFX EXPORT", "vfx")
         _make_tab("TEST", "test")
         self._draw_tab_fn = lambda: [_draw_tab(c, l, tid == self._active_tab)
                                       for tid, (c, l) in self._tab_canvases.items()]
@@ -1656,6 +1671,7 @@ class VFXExporterApp(tk.Tk):
         log_scroll.pack(side="right", fill="y")
         self.log_box = tk.Text(log_p, font=FONT_MONO, bg=BG_INPUT, fg=TEXT_PRIMARY,
                                 relief="flat", bd=0, height=16, width=1,
+                                highlightthickness=0,
                                 yscrollcommand=log_scroll.set, state="disabled", wrap="word")
         self.log_box.pack(fill="both", expand=True, padx=8, pady=8)
         log_scroll.config(command=self.log_box.yview)
@@ -1935,12 +1951,17 @@ class VFXExporterApp(tk.Tk):
         self._active_tab = tab_id
         if hasattr(self, '_draw_tab_fn'):
             self._draw_tab_fn()
+        # Capture current size before switching so window doesn't resize
+        current_w = self.winfo_width()
+        current_h = self.winfo_height()
         if tab_id == "vfx":
             self._test_content.pack_forget()
             self._vfx_content.pack(fill="both", expand=True)
         elif tab_id == "test":
             self._vfx_content.pack_forget()
             self._test_content.pack(fill="both", expand=True)
+        self.update_idletasks()
+        self.geometry(f"{current_w}x{current_h}")
 
     def _toggle_log(self):
         if self._log_visible:
@@ -2442,6 +2463,251 @@ class VFXExporterApp(tk.Tk):
                       fill="#FFFFFF", anchor="center")
         c.pack()
         self._show_pill_widget = c
+
+    def _setup_menu(self):
+        """Add Help menu to Mac menu bar — persists regardless of which window is focused."""
+        menubar = tk.Menu(self)
+        # Apple menu required for macOS menu bar to show other items
+        apple_menu = tk.Menu(menubar, name="apple", tearoff=0)
+        menubar.add_cascade(menu=apple_menu)
+        # Window menu — standard macOS convention
+        window_menu = tk.Menu(menubar, name="window", tearoff=0)
+        menubar.add_cascade(label="Window", menu=window_menu)
+        # Help menu
+        help_menu = tk.Menu(menubar, name="help", tearoff=0)
+        menubar.add_cascade(label="Help", menu=help_menu)
+        help_menu.add_command(label="Setup Guide", command=self._open_guide)
+        self.config(menu=menubar)
+        self.update_idletasks()
+
+    def _open_guide(self):
+        """Open the Setup Guide floating window."""
+        if hasattr(self, '_guide_win') and self._guide_win and self._guide_win.winfo_exists():
+            self._guide_win.lift()
+            self._guide_win.focus_force()
+            return
+
+        win = tk.Toplevel(self)
+        win.title("Setup Guide")
+        win.configure(bg="#161616")
+        win.resizable(False, False)
+        # Width = padx(32) + 4 tabs(130px) + 3 gaps(2px) + padx(32) + extra(16) = 606px
+        WIN_W = 592
+        self._guide_win = win
+
+        BG_WIN    = "#161616"
+        BG_PANEL  = "#1E1E1E"
+        TAB_INACT = "#252525"
+        TAB_BRDR  = "#3a3a3a"
+        CODE_BG   = "#111111"
+
+        # Header
+        tk.Label(win, text="Setup Guide", font=("SF Pro Display", 18, "bold"),
+                 bg=BG_WIN, fg=ACCENT).pack(pady=(24, 2))
+        tk.Label(win, text="Finishing Tool", font=("SF Pro Display", 12),
+                 bg=BG_WIN, fg=TEXT_MUTED).pack(pady=(0, 16))
+
+        # Tab bar
+        tab_row = tk.Frame(win, bg=BG_WIN)
+        tab_row.pack(fill="x", padx=32)
+
+        tab_names = ["PREPARING CLIPS", "TIMELINE", "REF VIDEO", "OUTPUT FOLDER"]
+        tab_ids   = ["clips", "timeline", "refvideo", "output"]
+        self._guide_tabs = {}
+        self._guide_active_tab = tk.StringVar(value="clips")
+
+        # Content area (built before tabs so tabs can reference it)
+        content_frame = tk.Frame(win, bg=BG_DARK, bd=0, highlightthickness=1,
+                                  highlightbackground="#5a5a5a", highlightcolor="#5a5a5a")
+        content_frame.pack(fill="x", padx=(32, 34), pady=(0, 24))
+
+        # Scrollable canvas inside content
+        # Section frames directly in content_frame — same pattern as main app tabs
+        sections = {}
+        for tid in tab_ids:
+            f = tk.Frame(content_frame, bg=BG_DARK, padx=20, pady=20)
+            sections[tid] = f
+
+        win.protocol("WM_DELETE_WINDOW", win.destroy)
+
+        guide_tab_canvases = {}
+
+        def _draw_guide_tab(canvas, label, active):
+            tw, th, r = 130, 36, 10
+            col = ACCENT if active else "#888888"
+            bg  = BG_DARK if active else "#252525"
+            lw  = 1.5 if active else 1
+            canvas.delete("all")
+            canvas.config(bg=BG_WIN)
+            canvas.create_rectangle(0, r, tw, th+1, fill=bg, outline="")
+            canvas.create_rectangle(r, 0, tw-r, r, fill=bg, outline="")
+            canvas.create_arc(0, 0, r*2, r*2, start=90, extent=90, fill=bg, outline="")
+            canvas.create_arc(tw-r*2, 0, tw, r*2, start=0, extent=90, fill=bg, outline="")
+            if active:
+                canvas.create_line(r, 1, tw-r, 1, fill=col, width=lw)
+                canvas.create_arc(1, 1, r*2+1, r*2+1, start=90, extent=90,
+                                  outline=col, style="arc", width=lw)
+                canvas.create_arc(tw-r*2-1, 1, tw-1, r*2+1, start=0, extent=90,
+                                  outline=col, style="arc", width=lw)
+                canvas.create_line(1, r, 1, th+1, fill=col, width=lw)
+                canvas.create_line(tw-1, r, tw-1, th+1, fill=col, width=lw)
+            fw = "bold" if active else "normal"
+            canvas.create_text(tw//2, th//2, text=label,
+                               font=("SF Pro Display", 11, fw), fill=col)
+
+        def _show_tab(tid):
+            for t, f in sections.items():
+                f.pack_forget()
+            sections[tid].pack(fill="both", expand=True, padx=20, pady=20)
+            for t, c in guide_tab_canvases.items():
+                lbl = tab_names[tab_ids.index(t)]
+                _draw_guide_tab(c, lbl, t == tid)
+            self._guide_active_tab.set(tid)
+            # Update height only, keep width fixed
+            win.update_idletasks()
+            h = win.winfo_reqheight()
+            win.geometry(f"{WIN_W}x{h}")
+
+        for i, (tid, tname) in enumerate(zip(tab_ids, tab_names)):
+            tw, th = 130, 36
+            c = tk.Canvas(tab_row, width=tw, height=th+1,
+                          bg=BG_WIN, highlightthickness=0)
+            c.pack(side="left", padx=(0, 2))
+            _draw_guide_tab(c, tname, i == 0)
+            c.bind("<Button-1>", lambda e, t=tid: _show_tab(t))
+            guide_tab_canvases[tid] = c
+            self._guide_tabs[tid] = c
+
+        def _section_hdr(parent, text):
+            tk.Label(parent, text=text, font=("SF Pro Display", 9, "bold"),
+                     bg=BG_DARK, fg="#888888").pack(anchor="w", pady=(16, 4))
+            tk.Frame(parent, bg="#2a2a2a", height=1).pack(fill="x", pady=(0, 12))
+
+        def _step(parent, num, title, body):
+            row = tk.Frame(parent, bg=BG_DARK)
+            row.pack(fill="x", pady=(0, 12))
+            c = tk.Canvas(row, width=24, height=24, bg=BG_DARK, highlightthickness=0)
+            c.create_oval(1, 1, 23, 23, outline=ACCENT, width=2, fill="")
+            c.create_text(12, 12, text=str(num), font=("SF Pro Display", 10, "bold"), fill=ACCENT)
+            c.pack(side="left", anchor="n", pady=2)
+            txt = tk.Frame(row, bg=BG_DARK)
+            txt.pack(side="left", padx=(10, 0), fill="x", expand=True)
+            tk.Label(txt, text=title, font=("SF Pro Display", 12, "bold"),
+                     bg=BG_DARK, fg="#ffffff", anchor="w").pack(anchor="w")
+            tk.Label(txt, text=body, font=("SF Pro Display", 11),
+                     bg=BG_DARK, fg="#888888", anchor="w", wraplength=420, justify="left"
+                     ).pack(anchor="w", pady=(2, 0))
+
+        def _tip(parent, text):
+            f = tk.Frame(parent, bg=BG_DARK)
+            f.pack(fill="x", pady=(4, 12))
+            tk.Frame(f, bg=ACCENT, width=3).pack(side="left", fill="y")
+            tk.Label(f, text=text, font=("SF Pro Display", 10), bg=BG_DARK,
+                     fg="#777777", wraplength=420, justify="left",
+                     padx=10, pady=8).pack(side="left", anchor="w")
+
+        def _code(parent, text, color=None):
+            tk.Label(parent, text=text, font=("SF Mono", 10),
+                     bg=CODE_BG, fg=color or ACCENT,
+                     anchor="w", padx=10, pady=6, wraplength=440, justify="left"
+                     ).pack(fill="x", pady=(2, 6))
+
+        def _chip(parent, text, bg, fg):
+            return tk.Label(parent, text=text, font=("SF Pro Display", 9, "bold"),
+                            bg=bg, fg=fg, padx=6, pady=1)
+
+        # ── PREPARING CLIPS ──────────────────────────────────────────────────
+        sec = sections["clips"]
+        _section_hdr(sec, "CLIP COLORS")
+        _step(sec, 1, "Orange → VFX plates",
+              "Any clip with the Orange clip color will be exported as a VFX plate. "
+              "If clips are stacked on higher tracks and also orange, each layer gets a suffix: _V1, _V2, _V3, and so on.")
+        _step(sec, 2, "Apricot → Clean plates",
+              "Clips with the Apricot clip color are exported with a _CLEAN suffix — "
+              "use these for shots that need a clean version without VFX elements.")
+        _step(sec, 3, "Chocolate → Reused plates",
+              "Clips with the Chocolate clip color are reused plates and are ignored "
+              "during export — they won't be included in the turnover.")
+        _tip(sec, "Tip: Right-click any clip → Clip Color → choose the color. "
+                  "You can select multiple clips and apply a clip color to all of them at once.")
+        _section_hdr(sec, "CLIP EFFECTS")
+        _step(sec, 1, "Speed effects & compound clips",
+              "The export preset automatically removes speed effects during export. "
+              "To preserve a speed effect, wrap the clip in a compound clip first — "
+              "this bakes it in so it exports correctly. Other effects like keyframes "
+              "are retained unless removed manually.")
+        _step(sec, 2, "Transitions & handles",
+              "The export preset automatically includes handles for transitions — "
+              "as long as the transition effect is applied to the clip. No extra steps needed.")
+        _step(sec, 3, "Color correction",
+              "Make sure your color grade is applied and finalized before exporting. "
+              "Whatever grade is on the clip is what VFX will receive.")
+        _tip(sec, "Tip: After scanning, you can toggle individual episodes on or off "
+                  "before exporting — so you don't have to export everything at once.")
+
+        # ── TIMELINE ─────────────────────────────────────────────────────────
+        sec = sections["timeline"]
+        _section_hdr(sec, "NAMING CONVENTION")
+        _step(sec, 1, "Recommended timeline format",
+              "Naming your DaVinci timeline using this format helps the app auto-detect "
+              "your show info — but you can always switch to Manual mode if needed:")
+        _code(sec, "SHOWCODE_ACRONYM_STRINGOUT_VFX_EP##-##_YYMMDD_COLOR")
+        tk.Label(sec, text="Example timeline name:", font=("SF Pro Display", 10),
+                 bg=BG_DARK, fg="#555").pack(anchor="w", pady=(4, 0))
+        _code(sec, "V-LA30_TKWNM_STRINGOUT_VFX_EP01-57_260619_COLOR")
+        tk.Label(sec, text="Resulting VFX plate filename:", font=("SF Pro Display", 10),
+                 bg=BG_DARK, fg="#555").pack(anchor="w", pady=(4, 0))
+        _code(sec, "V-LA30_TKWNM_VFX_EP01_260619_01", color="#6fcf6f")
+        _step(sec, 2, "Manual mode",
+              "If your timeline doesn't follow this format, switch to Manual mode "
+              "in the Show Info section and enter your show code, acronym, and date directly.")
+        _tip(sec, "Tip: The timeline name is only used for auto-detection. Exported filenames "
+                  "are always generated from the show code and acronym.")
+
+        # ── REF VIDEO ────────────────────────────────────────────────────────
+        sec = sections["refvideo"]
+        _section_hdr(sec, "SETUP")
+        _step(sec, 1, "Import into DaVinci's Media Pool",
+              "The reference video must be imported into DaVinci Resolve's Media Pool "
+              "for the app to detect it. Without it in the Media Pool, auto-detection will not work.")
+        _step(sec, 2, "Name your reference video",
+              "Following the same naming convention helps the app find it automatically — "
+              "but you can always browse to it manually:")
+        _code(sec, "SHOWCODE_ACRONYM_VFX_EP##_YYMMDD_##.mov")
+        _step(sec, 3, "Place it in the right folder",
+              "Put the reference video inside the TO VFX folder. "
+              "The app will scan for it automatically on connect.")
+        _step(sec, 4, "Start timecode",
+              "The app reads the start timecode automatically. "
+              "If it can't detect it, enter it manually in the Show Info section.")
+        _tip(sec, "Tip: Screenshots for the List to Post are taken from this reference video "
+                  "— make sure it matches the timeline frame-for-frame.")
+
+        # ── OUTPUT FOLDER ─────────────────────────────────────────────────────
+        sec = sections["output"]
+        _section_hdr(sec, "FOLDER STRUCTURE")
+        _step(sec, 1, "Drive structure",
+              "The app scans mounted volumes for this structure:")
+        _code(sec, "/Volumes/SHOWCODE_*/SHOWCODE_*_EDIT/\n\u2192 folder with 'TURNOVER' in name\n\u2192 folder with 'TO VFX' in name")
+        _step(sec, 2, "What gets created",
+              "Inside TO VFX, the app creates one subfolder per episode plus a "
+              "LIST TO POST folder containing the .xlsx document and screenshots.")
+        _tip(sec, "Tip: If the drive isn't auto-detected, switch to Manual mode "
+                  "and browse to your TO VFX folder directly.")
+
+        # Show first tab
+        _show_tab("clips")
+
+        # No separate menu on guide window — main app menu bar handles Help
+
+        # Set fixed width, natural height, center on screen
+        win.update_idletasks()
+        sw = win.winfo_screenwidth()
+        sh = win.winfo_screenheight()
+        h = win.winfo_reqheight() or 500
+        win.geometry(f"{WIN_W}x{h}+{(sw-WIN_W)//2}+{(sh-h)//2}")
+        win.lift()
+        win.focus_force()
 
     def _enable_reset_btn(self):
         """Enable the RESET ALL button."""
