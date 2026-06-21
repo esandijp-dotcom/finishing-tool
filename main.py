@@ -1249,6 +1249,8 @@ class VFXExporterApp(tk.Tk):
         except Exception:
             pass
         self.resizable(False, False)
+        self.attributes("-alpha", 0)
+        self.withdraw()
 
         self.engine = None
         self.episode_markers = []
@@ -1277,6 +1279,21 @@ class VFXExporterApp(tk.Tk):
             var.trace_add("write", lambda *args: self.after(0, self._update_filename_preview))
 
         self._build_ui()
+        self.update_idletasks()
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        w = self.winfo_reqwidth()
+        h = self.winfo_reqheight()
+        if w < 100:
+            w, h = 900, 800
+        x = (sw - w) // 2
+        y = (sh - h) // 2
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.update_idletasks()
+        self.deiconify()
+        self.attributes("-alpha", 1)
+        self.lift()
+        self.focus_force()
         self.after(200, self._disable_reset_btn)
         self._check_deps_on_start()
         self.after(2000, self._check_for_updates)
