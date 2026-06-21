@@ -251,7 +251,11 @@ def get_offline_reference_path(project, show_code=""):
             return (match_score, -c["date"], c["duration_diff"])
 
         candidates.sort(key=score)
-        return candidates[0]["path"]
+        best_path = candidates[0]["path"]
+        # Only return if file actually exists on disk
+        if os.path.exists(best_path):
+            return best_path
+        return None
 
     except Exception:
         return None
@@ -706,9 +710,7 @@ def generate_plate_list_xlsx(export_list, output_dir, show_code, acronym, date_s
                               shot_map=None, list_folder=None, log_callback=None,
                               timeline=None, **kwargs):
     """Generate plate list xlsx using pre-captured screenshots from shot_map."""
-    import openpyxl, os
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-    from openpyxl.drawing.image import Image as XLImage
+    import xlsxwriter, os
 
     if shot_map is None:
         shot_map = {}
@@ -752,46 +754,45 @@ def generate_plate_list_xlsx(export_list, output_dir, show_code, acronym, date_s
             seen[key]["layers"] += 1
     unique_plates = sorted(seen.values(), key=lambda x: x["item"]["start_frame"])
 
-    # Create workbook
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Plate List"
+    CELL_H_PX = 190
+    ROW_H_PT  = CELL_H_PX * 72 / 96
+    _tmp_files = []
 
-    # Header style
-    header_fill = PatternFill("solid", start_color="1E1E1E")
-    header_font = Font(name="Arial", bold=True, color="E8A838", size=10)
-    cell_font = Font(name="Arial", size=10)
-    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    left = Alignment(horizontal="left", vertical="center", wrap_text=True)
-    thin = Border(
-        left=Side(style="thin", color="333333"),
-        right=Side(style="thin", color="333333"),
-        top=Side(style="thin", color="333333"),
-        bottom=Side(style="thin", color="333333")
-    )
+    # Create workbook with XlsxWriter
+    wb = xlsxwriter.Workbook(out_path)
+    ws = wb.add_worksheet("Plate List")
 
-    columns = ["FILE NAME", "EPISODE", "PLATES TO TURNOVER",
-               "VFX REF TIMECODE_IN", "VFX REF TIMECODE_OUT",
-               "TURNOVER STATUS", "TURNOVER NOTE", "VFX", "VFX NOTE", "SCREENSHOT"]
+    # Formats
+    header_fmt = wb.add_format({
+        'bold': True, 'font_name': 'Arial', 'font_size': 10,
+        'font_color': '#E8A838', 'bg_color': '#1E1E1E',
+        'align': 'center', 'valign': 'vcenter',
+        'border': 1, 'border_color': '#333333'
+    })
+    cell_fmt = wb.add_format({
+        'font_name': 'Arial', 'font_size': 10,
+        'align': 'center', 'valign': 'vcenter',
+        'text_wrap': True,
+        'border': 1, 'border_color': '#333333'
+    })
+
+    columns   = ["FILE NAME", "EPISODE", "PLATES TO TURNOVER",
+                 "VFX REF TIMECODE_IN", "VFX REF TIMECODE_OUT",
+                 "TURNOVER STATUS", "TURNOVER NOTE", "VFX", "VFX NOTE", "SCREENSHOT"]
     col_widths = [45, 12, 20, 22, 22, 18, 20, 12, 20, 25]
 
-    for col_idx, (col_name, col_w) in enumerate(zip(columns, col_widths), 1):
-        cell = ws.cell(row=1, column=col_idx, value=col_name)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = center
-        cell.border = thin
-        ws.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = col_w
-
-    ws.row_dimensions[1].height = 24
+    # Header row
+    for col_idx, (col_name, col_w) in enumerate(zip(columns, col_widths)):
+        ws.write(0, col_idx, col_name, header_fmt)
+        ws.set_column(col_idx, col_idx, col_w)
+    ws.set_row(0, 18)
 
     # Data rows
-
-    for row_idx, plate_data in enumerate(unique_plates, 2):
-        item = plate_data["item"]
+    for row_idx, plate_data in enumerate(unique_plates, 1):
+        item   = plate_data["item"]
         layers = plate_data["layers"]
 
-        tc_in = frames_to_tc(item["start_frame"])
+        tc_in  = frames_to_tc(item["start_frame"])
         tc_out = frames_to_tc(item["end_frame"])
 
         values = [
@@ -800,39 +801,41 @@ def generate_plate_list_xlsx(export_list, output_dir, show_code, acronym, date_s
             layers,
             tc_in,
             tc_out,
-            "", "", "", "",
+            "", "", "", "", ""
         ]
 
-        for col_idx, val in enumerate(values, 1):
-            cell = ws.cell(row=row_idx, column=col_idx, value=val)
-            cell.font = cell_font
-            cell.alignment = center if col_idx > 1 else left
-            cell.border = thin
+        ws.set_row(row_idx, ROW_H_PT)
 
+        for col_idx, val in enumerate(values):
+            ws.write(row_idx, col_idx, val, cell_fmt)
 
-        # Screenshot — use pre-captured shot from shot_map
+        # Screenshot — embed directly into cell
         shot_data = shot_map.get(item["filename"])
         if shot_data:
             shot_path, img_w, img_h = shot_data if isinstance(shot_data, tuple) else (shot_data, 160, 90)
             if os.path.exists(shot_path):
-                # Row = 190px tall, image fills it exactly
-                CELL_H_PX = 190
-                ratio = CELL_H_PX / img_h
-                disp_w = int(img_w * ratio)
-                disp_h = CELL_H_PX
-                xl_img = XLImage(shot_path)
-                xl_img.width = disp_w
-                xl_img.height = disp_h
-                col_letter = openpyxl.utils.get_column_letter(10)
-                ws.add_image(xl_img, f"{col_letter}{row_idx}")
-                ws.row_dimensions[row_idx].height = CELL_H_PX * 72 / 96  # px to pt
-                ws.column_dimensions[col_letter].width = max(
-                    ws.column_dimensions[col_letter].width or 0, disp_w / 7 + 2)
+                try:
+                    # Scale to fit cell height, maintain aspect ratio, center horizontally
+                    # Cell: ~175px wide x 190px tall. Image: 720x1280
+                    scale = CELL_H_PX / 1280.0
+                    scaled_w = 720 * scale  # ~106px
+                    CELL_W_PX = 175
+                    x_offset = max(0, int((CELL_W_PX - scaled_w) / 2))
+                    ws.insert_image(row_idx, 9, shot_path, {
+                        'x_scale': scale,
+                        'y_scale': scale,
+                        'x_offset': x_offset,
+                        'y_offset': 2,
+                        'positioning': 1
+                    })
+                except Exception as e:
+                    if log_callback:
+                        log_callback(f"  ⚠ Screenshot embed failed: {e}")
 
         if log_callback:
-            log_callback(f"  [{row_idx-1}/{len(unique_plates)}] {item['filename']}")
+            log_callback(f"  [{row_idx}/{len(unique_plates)}] {item['filename']}")
 
-    wb.save(out_path)
+    wb.close()
 
     if log_callback:
         log_callback(f"✓ Plate list saved: {filename}")
@@ -1257,7 +1260,9 @@ class VFXExporterApp(tk.Tk):
         self.episode_markers = []
         self.export_list = []
         self.reference_video_path = tk.StringVar()
+        self.reference_video_path.trace_add("write", lambda *a: self._on_ref_video_change())
         self.output_dir = tk.StringVar(value="")
+        self.output_dir.trace_add("write", lambda *a: self._on_output_dir_change())
         self.show_code = tk.StringVar()
         self.show_acronym = tk.StringVar()
         self.export_date = tk.StringVar(value=datetime.now().strftime("%y%m%d"))
@@ -1805,10 +1810,13 @@ class VFXExporterApp(tk.Tk):
         self.btn_reset.bind("<Leave>", lambda e: self.btn_reset._draw(self.btn_reset._bg))
         self.btn_reset.bind("<ButtonPress-1>", lambda e: self.btn_reset._draw("#6e1a1a"))
         def _on_stop_release(e):
-            self.btn_reset._text = "RESET ALL"
-            self.btn_reset._bg = "#2a6e2a"
-            self.btn_reset._draw("#2a6e2a")
-            self._enable_reset_btn()
+            # Disable immediately — re-enable when export actually stops
+            self.btn_reset.unbind("<Enter>")
+            self.btn_reset.unbind("<Leave>")
+            self.btn_reset.unbind("<ButtonPress-1>")
+            self.btn_reset.unbind("<ButtonRelease-1>")
+            self.btn_reset._draw("#6e1a1a")
+            self.progress_status.config(text="Stopping export...")
             self._stop_export_now()
         self.btn_reset.bind("<ButtonRelease-1>", _on_stop_release)
 
@@ -1818,9 +1826,19 @@ class VFXExporterApp(tk.Tk):
         self._set_progress_normal()
         if start_index == 0:
             self.progress_var.set(0)
-            self.progress_status.config(text="")
+            self.progress_status.config(text="Preparing export...")
+        else:
+            self.progress_status.config(text="Resuming export...")
         self._set_btn_state(self.btn_export, False)
-        self._set_stop_button()
+        # Disable STOP until export actually starts
+        self._disable_reset_btn()
+        self.btn_reset._text = "STOP"
+        self.btn_reset._bg = "#8e2a2a"
+        self.btn_reset._draw("#6e1a1a")
+        self.btn_reset.unbind("<Enter>")
+        self.btn_reset.unbind("<Leave>")
+        self.btn_reset.unbind("<ButtonPress-1>")
+        self.btn_reset.unbind("<ButtonRelease-1>")
         self._start_thinking()
         self._export_started = True
         self.after(0, self._update_episode_list)
@@ -1832,12 +1850,31 @@ class VFXExporterApp(tk.Tk):
                 # Always sync filtered list to engine before running
                 self.engine.export_list = self.export_list
 
+                # Now exporting for real — enable STOP button
+                def _enable_stop_export():
+                    self.progress_status.config(text="Starting render...")
+                    self._set_stop_button()
+                self.after(0, _enable_stop_export)
+
                 # Setup per-clip screenshots if checkbox enabled
                 _do_screenshots = self._create_xlsx.get()
                 _shot_map = {}
                 _list_folder = os.path.join(output, "LIST TO POST")
                 _shots_folder = os.path.join(_list_folder, "SCREENSHOTS")
                 _grab_screenshot = None
+
+                # Pre-populate shot_map with any screenshots already saved to disk
+                # (from a previous session before stop/continue)
+                if os.path.exists(_shots_folder):
+                    for fname in os.listdir(_shots_folder):
+                        if fname.lower().endswith((".jpg", ".jpeg", ".png")):
+                            clip_name = os.path.splitext(fname)[0]
+                            # Match against export list filenames (without extension)
+                            for item in self.export_list:
+                                if os.path.splitext(item["filename"])[0] == clip_name:
+                                    img_path = os.path.join(_shots_folder, fname)
+                                    _shot_map[item["filename"]] = (img_path, 720, 1280)
+                                    break
 
                 if _do_screenshots:
                     import cv2 as _cv2
@@ -1911,8 +1948,9 @@ class VFXExporterApp(tk.Tk):
                     self.after(0, lambda: self.progress_status.config(
                         text="All VFX plates have been exported."))
                     self.after(0, self._enable_reset_export_btn)
-                    if _do_screenshots and _shot_map:
+                    if self._create_xlsx.get():
                         self.after(0, lambda: self._log("Building plate list xlsx...", "muted"))
+                        self.after(0, lambda: self.progress_status.config(text="Building List to Post..."))
                         _exp_list = list(self.export_list)
                         _show = self.show_code.get().strip() or "SHOW"
                         _acr = self.show_acronym.get().strip() or "ACRN"
@@ -1924,7 +1962,7 @@ class VFXExporterApp(tk.Tk):
                             self.after(0, lambda m=msg, t=tag: self._log(m, t))
                         def _gen_xlsx():
                             try:
-                                generate_plate_list_xlsx(
+                                result = generate_plate_list_xlsx(
                                     export_list=_exp_list,
                                     output_dir=output,
                                     show_code=_show,
@@ -1935,8 +1973,13 @@ class VFXExporterApp(tk.Tk):
                                     timeline=_tl,
                                     log_callback=_safe_log
                                 )
+                                _safe_log(f"✓ Plate list saved: {result}", "success")
+                                self.after(0, lambda: self.progress_status.config(
+                                    text="All VFX plates have been exported."))
                             except Exception as xe:
+                                import traceback
                                 _safe_log(f"✗ Plate list error: {xe}", "error")
+                                _safe_log(traceback.format_exc(), "error")
                         threading.Thread(target=_gen_xlsx, daemon=True).start()
                 else:
                     self._log("✗ Export failed — check log for details.", "error")
@@ -2057,6 +2100,28 @@ class VFXExporterApp(tk.Tk):
             self.hour_wrap.pack(side="left")
             self.hour_hint.pack(side="left", padx=(8, 0))
         self._update_filename_preview()
+
+    def _on_ref_video_change(self):
+        """Enable/disable Scan Episodes based on whether ref video is set."""
+        if not hasattr(self, 'btn_scan'):
+            return
+        # Connected = engine has a timeline
+        connected = (hasattr(self, 'engine') and self.engine is not None
+                     and getattr(self.engine, 'timeline', None) is not None)
+        has_ref = bool(self.reference_video_path.get().strip())
+        self._set_btn_state(self.btn_scan, connected and has_ref)
+
+    def _on_output_dir_change(self):
+        """Enable/disable Export based on whether output folder is set."""
+        if not hasattr(self, 'btn_export'):
+            return
+        has_output = bool(self.output_dir.get().strip())
+        # Only enable export if scan is done (export_list exists)
+        has_scan = bool(getattr(self, 'export_list', None))
+        if has_output and has_scan:
+            self._set_btn_state(self.btn_export, True)
+        elif not has_output and has_scan:
+            self._set_btn_state(self.btn_export, False)
 
     def _on_ref_mode_change(self):
         if hasattr(self, "_enable_reset_btn"): self._enable_reset_btn()
@@ -2871,10 +2936,18 @@ class VFXExporterApp(tk.Tk):
                             self.reference_video_path.set(ref_path)
                             self._log(f"Ref video: {os.path.basename(ref_path)}.", "success")
                         else:
-                            self._log("Reference video not found — will try again on scan.", "warn")
+                            self._log("Reference video not found — switched to Manual. Please browse to your ref video.", "warn")
+                            self.after(0, lambda: self.ref_mode.set("manual"))
+                            self.after(0, self._on_ref_mode_change)
+                            self.after(0, lambda: self.reference_video_path.set(""))
 
-                    # Enable scan only after all detection is complete
-                    self.after(0, lambda: self._set_btn_state(self.btn_scan, True))
+                    # Enable scan only if ref video is available
+                    def _enable_scan_if_ref():
+                        has_ref = bool(self.reference_video_path.get().strip())
+                        self._set_btn_state(self.btn_scan, has_ref)
+                        if not has_ref:
+                            self._log("⚠ Scan Episodes disabled — no reference video selected.", "warn")
+                    self.after(0, _enable_scan_if_ref)
                     self.after(0, self._stop_thinking)
                     self.after(0, lambda: self._xlsx_check.config(state="normal", fg=TEXT_PRIMARY))
 
@@ -2888,9 +2961,10 @@ class VFXExporterApp(tk.Tk):
                             self.output_dir.set(found)
                             self._log(f"Output folder: {found}", "success")
                         else:
-                            self._log("Output folder not found — switching to Manual.", "warn")
-                            self.out_mode.set("manual")
-                            self._on_out_mode_change()
+                            self._log("Output folder not found — switched to Manual. Please browse to your TO VFX folder.", "warn")
+                            self.after(0, lambda: self.out_mode.set("manual"))
+                            self.after(0, self._on_out_mode_change)
+                            self.after(0, lambda: self.output_dir.set(""))
                 self.after(0, autofill)
 
             except Exception as e:
@@ -2902,29 +2976,43 @@ class VFXExporterApp(tk.Tk):
         # Immediate UI feedback
         self._xlsx_check.config(state="disabled", fg="#444444")
         self._set_btn_state(self.btn_scan, False)
-        self.progress_status.config(text="")
+        self.progress_status.config(text="Preparing scan...")
         self.progress_var.set(0)
         self._set_progress_normal()
         self._set_step_active(1)
         self._start_thinking()
+        # Disable STOP until scan actually starts
+        self._disable_reset_btn()
         self.btn_reset._text = "STOP"
         self.btn_reset._bg = "#8e2a2a"
-        self.btn_reset._draw("#8e2a2a")
-        self.btn_reset._action = self._stop_scan_now
-        self.btn_reset.bind("<Enter>", lambda e: self.btn_reset._draw("#ae3a3a"))
-        self.btn_reset.bind("<Leave>", lambda e: self.btn_reset._draw(self.btn_reset._bg))
-        self.btn_reset.bind("<ButtonPress-1>", lambda e: self.btn_reset._draw("#6e1a1a"))
-        def _stop_scan_release(e):
-            self.btn_reset._text = "RESET ALL"
-            self.btn_reset._bg = "#2a6e2a"
-            self.btn_reset._draw("#2a6e2a")
-            self.btn_reset._action = self._do_reset
-            self._enable_reset_btn()
-            self._stop_scan_now()
-        self.btn_reset.bind("<ButtonRelease-1>", _stop_scan_release)
+        self.btn_reset._draw("#6e1a1a")
+        self.btn_reset.unbind("<Enter>")
+        self.btn_reset.unbind("<Leave>")
+        self.btn_reset.unbind("<ButtonPress-1>")
+        self.btn_reset.unbind("<ButtonRelease-1>")
         def task():
             try:
                 self._scanning = True
+                # Now scanning for real — enable STOP button
+                def _enable_stop_scan():
+                    self.btn_reset._text = "STOP"
+                    self.btn_reset._bg = "#8e2a2a"
+                    self.btn_reset._draw("#8e2a2a")
+                    self.btn_reset.bind("<Enter>", lambda e: self.btn_reset._draw("#ae3a3a"))
+                    self.btn_reset.bind("<Leave>", lambda e: self.btn_reset._draw(self.btn_reset._bg))
+                    self.btn_reset.bind("<ButtonPress-1>", lambda e: self.btn_reset._draw("#6e1a1a"))
+                    def _stop_scan_release(e):
+                        # Disable immediately on click
+                        self.btn_reset.unbind("<Enter>")
+                        self.btn_reset.unbind("<Leave>")
+                        self.btn_reset.unbind("<ButtonPress-1>")
+                        self.btn_reset.unbind("<ButtonRelease-1>")
+                        self.btn_reset._draw("#6e1a1a")
+                        self.progress_status.config(text="Stopping scan...")
+                        self._stop_scan_now()
+                    self.btn_reset.bind("<ButtonRelease-1>", _stop_scan_release)
+                self.after(0, _enable_stop_scan)
+                self.after(0, lambda: self.progress_status.config(text="Scanning episodes..."))
 
                 # Pass ref video path regardless of mode - already detected during connect
                 ref = self.reference_video_path.get().strip() or None
@@ -2943,6 +3031,7 @@ class VFXExporterApp(tk.Tk):
                     self.after(0, lambda: self.progress_status.config(
                         text="Scan stopped. Click Scan Episodes to retry."))
                     self.after(0, lambda: self._xlsx_check.config(state="normal", fg=TEXT_PRIMARY))
+                    self.after(0, self._restore_reset_btn)
                     self._set_btn_state(self.btn_scan, True)
                     return
 
@@ -2975,15 +3064,16 @@ class VFXExporterApp(tk.Tk):
                 self.after(0, lambda: self.progress_status.config(text="Click Export to Continue."))
                 self.after(0, self._restore_reset_btn)
                 self.after(0, lambda: self._set_btn_state(self.btn_scan, False))
-                self._set_btn_state(self.btn_export, True)
+                # Only enable export if output folder is set
+                has_output = bool(self.output_dir.get().strip())
+                self._set_btn_state(self.btn_export, has_output)
+                if not has_output:
+                    self._log("⚠ Export disabled — please select an output folder.", "warn")
                 self.after(0, lambda: self._xlsx_check.config(state="normal", fg=TEXT_PRIMARY))
             except FileNotFoundError:
                 self._scanning = False
                 self.after(0, self._stop_thinking)
-                self._log("✗ Reference video not found. Switching to Manual — please browse.", "error")
-                self.after(0, lambda: self.ref_mode.set("manual"))
-                self.after(0, self._on_ref_mode_change)
-                self.after(100, self._browse_reference)
+                self._log("✗ Reference video not found. Please browse to it in the Reference Video section.", "error")
                 self._restore_reset_btn()
                 self._set_btn_state(self.btn_scan, True)
             except Exception as e:

@@ -15,17 +15,17 @@ OPTIONS = {
         'CFBundleName': 'Finishing Tool',
         'CFBundleDisplayName': 'Finishing Tool',
         'CFBundleIdentifier': 'com.finishingtool.app',
-        'CFBundleVersion': '1.0.2',
-        'CFBundleShortVersionString': '1.0.2',
+        'CFBundleVersion': '1.0',
+        'CFBundleShortVersionString': '1.0',
         'NSHighResolutionCapable': True,
         'LSMinimumSystemVersion': '12.0',
     },
     'packages': [
-        'PIL', 'cv2', 'pytesseract', 'openpyxl', 'numpy',
+        'PIL', 'cv2', 'pytesseract', 'openpyxl', 'xlsxwriter', 'numpy',
         'tkinter', 'urllib', 'threading', 'json',
     ],
     'includes': [
-        'PIL', 'cv2', 'pytesseract', 'openpyxl', 'numpy', 'tkinter',
+        'PIL', 'cv2', 'pytesseract', 'openpyxl', 'xlsxwriter', 'numpy', 'tkinter',
     ],
     'excludes': ['matplotlib', 'scipy', 'PyQt5', 'PyQt6'],
 }

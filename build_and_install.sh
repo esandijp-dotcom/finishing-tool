@@ -55,6 +55,7 @@ echo "→ Installing Python packages..."
     pytesseract \
     pillow \
     openpyxl \
+    xlsxwriter \
     numpy \
     py2app
 
