@@ -726,7 +726,7 @@ def generate_plate_list_xlsx(export_list, output_dir, show_code, acronym, date_s
         try:
             fps = float(timeline.GetSetting("timelineFrameRate") or 24)
             start_tc_offset = timeline.GetStartTimecode() or "00:00:00:00"
-        except:
+        except Exception:
             pass
 
     def frames_to_tc(frame_num):
@@ -734,7 +734,7 @@ def generate_plate_list_xlsx(export_list, output_dir, show_code, acronym, date_s
             parts = start_tc_offset.split(":")
             offset = (int(parts[0])*3600 + int(parts[1])*60 + int(parts[2])) * int(fps) + int(parts[3])
             total = frame_num
-        except:
+        except Exception:
             total = frame_num
         fi = int(fps)
         ff = total % fi; total //= fi
@@ -1255,7 +1255,7 @@ class VFXExporterApp(tk.Tk):
         self.episode_markers = []
         self.export_list = []
         self.reference_video_path = tk.StringVar()
-        self.output_dir = tk.StringVar(value=os.path.expanduser("~/Desktop/VFX_Export"))
+        self.output_dir = tk.StringVar(value="")
         self.show_code = tk.StringVar()
         self.show_acronym = tk.StringVar()
         self.export_date = tk.StringVar(value=datetime.now().strftime("%y%m%d"))
@@ -1290,6 +1290,8 @@ class VFXExporterApp(tk.Tk):
         # ── App title + Reset button ───────────────────────────────────────
         title_row = tk.Frame(main, bg=BG_OUTER)
         title_row.pack(fill="x", pady=(0, 0))
+
+        # Left: Finishing Tool + version
         title_lbl_frame = tk.Frame(title_row, bg=BG_OUTER)
         title_lbl_frame.pack(side="left")
         tk.Label(title_lbl_frame, text="Finishing Tool", font=FONT_TITLE,
@@ -1297,6 +1299,11 @@ class VFXExporterApp(tk.Tk):
         self._version_label = tk.Label(title_lbl_frame, text=f"v{APP_VERSION}", font=("SF Pro Display", 13),
                  bg=BG_OUTER, fg=TEXT_MUTED)
         self._version_label.pack(side="left", padx=(8, 0), pady=(6, 0))
+
+        # Center: show code pill (hidden until connected)
+        self._show_pill = tk.Frame(title_row, bg=BG_OUTER)
+        self._show_pill.pack(side="left", expand=True)
+        self._show_pill_widget = None
         # Reset button as rounded canvas
         # Reset button as canvas for color control on macOS
         def _make_reset_canvas(text, bg, fg):
@@ -2388,6 +2395,29 @@ class VFXExporterApp(tk.Tk):
         except Exception as e:
             self._log(f"✗ Update failed: {e}", "error")
 
+    def _update_show_pill(self, text=""):
+        """Show or hide the project name pill in the title row."""
+        # Remove old pill if exists
+        if hasattr(self, '_show_pill_widget') and self._show_pill_widget:
+            self._show_pill_widget.destroy()
+            self._show_pill_widget = None
+        if not text:
+            return
+        import tkinter.font as tkfont
+        f = tkfont.Font(family="SF Pro Display", size=13, weight="normal")
+        tw = f.measure(text)
+        w = tw + 48
+        h = 32
+        r = 8
+        c = tk.Canvas(self._show_pill, width=w, height=h,
+                      bg=BG_OUTER, highlightthickness=0)
+        pts = [r,0, w-r,0, w,0, w,r, w,h-r, w,h, w-r,h, r,h, 0,h, 0,h-r, 0,r, 0,0]
+        c.create_polygon(pts, fill="#0e0e0e", outline="", smooth=True)
+        c.create_text(w//2, h//2, text=text, font=("SF Pro Display", 13),
+                      fill="#FFFFFF", anchor="center")
+        c.pack()
+        self._show_pill_widget = c
+
     def _enable_reset_btn(self):
         """Enable the RESET ALL button."""
         if not hasattr(self, 'btn_reset'):
@@ -2440,6 +2470,8 @@ class VFXExporterApp(tk.Tk):
         self._stop_export = True
         self._stop_scan = True
         self._export_started = False
+        if hasattr(self, '_show_pill'):
+            self._update_show_pill("")
         self._all_disabled = False
         self.btn_toggle_all.config(text="DISABLE ALL", bg=BG_INPUT, fg=TEXT_PRIMARY)
         self._disabled_episodes.clear()
@@ -2510,6 +2542,12 @@ class VFXExporterApp(tk.Tk):
                 info = self.engine.connect()
                 self._set_btn_state(self.btn_connect, False)
                 self._log(f"✓ Connected: {info['name']}.", "success")
+                _sc = info.get("show_code", "").strip()
+                _ac = info.get("show_acronym", "").strip()
+                if _sc and _ac:
+                    self.after(0, lambda s=f"{_sc}_{_ac}": self._update_show_pill(s))
+                elif _sc:
+                    self.after(0, lambda s=_sc: self._update_show_pill(s))
                 self._set_step_done(0)
                 self.after(0, lambda: self._connect_status.config(text=""))
 
@@ -2891,5 +2929,5 @@ if __name__ == "__main__":
         try:
             import tkinter.messagebox as mb
             mb.showerror("Startup Error", traceback.format_exc())
-        except:
+        except Exception:
             traceback.print_exc()
