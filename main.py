@@ -635,7 +635,7 @@ def render_clip_now(project, timeline, clip, track_index, render_preset,
 def find_output_folder(show_code, show_acronym):
     """
     Auto-detect output folder by searching mounted volumes for SHOWCODE.
-    Structure: /Volumes/SHOWCODE_*/SHOWCODE_*_EDIT/TO VFX
+    Structure: /Volumes/SHOWCODE_*/SHOWCODE_*_EDIT/<folder with TURNOVER>/<folder with TO VFX>
     """
     import glob
 
@@ -655,9 +655,29 @@ def find_output_folder(show_code, show_acronym):
         if not edit_folders:
             continue
         for edit_folder in sorted(edit_folders):
-            to_vfx = os.path.join(edit_folder, "TO VFX")
-            if os.path.exists(to_vfx):
-                return to_vfx
+            # Find folder with TURNOVER in name
+            try:
+                turnover_folders = [
+                    os.path.join(edit_folder, d)
+                    for d in os.listdir(edit_folder)
+                    if "TURNOVER" in d.upper() and
+                    os.path.isdir(os.path.join(edit_folder, d))
+                ]
+            except Exception:
+                continue
+            for turnover_folder in sorted(turnover_folders):
+                # Find folder with TO VFX in name inside turnover folder
+                try:
+                    to_vfx_folders = [
+                        os.path.join(turnover_folder, d)
+                        for d in os.listdir(turnover_folder)
+                        if "TO VFX" in d.upper() and
+                        os.path.isdir(os.path.join(turnover_folder, d))
+                    ]
+                except Exception:
+                    continue
+                for to_vfx in sorted(to_vfx_folders):
+                    return to_vfx
 
     return None
 
