@@ -1340,7 +1340,7 @@ class VFXExporterApp(tk.Tk):
         self.btn_reset._action = self._do_reset
         self.btn_reset._enabled = False
 
-        tk.Label(main, text="DaVinci Resolve API",
+        tk.Label(main, text="DaVinci Resolve API by Juan Esandi",
                  font=FONT_SMALL, bg=BG_OUTER, fg=TEXT_MUTED).pack(anchor="w", pady=(0, 36))
         self._thinking_active = False
         self._thinking_frames = []

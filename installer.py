@@ -79,7 +79,7 @@ class InstallerApp(tk.Tk):
     def _build_ui(self):
         tk.Label(self, text="Finishing Tool", font=("SF Pro Display", 26, "bold"),
                  bg=BG_DARK, fg=ACCENT).pack(pady=(32, 0))
-        tk.Label(self, text="Installer", font=("SF Pro Display", 13),
+        tk.Label(self, text="Installer by Juan Esandi", font=("SF Pro Display", 13),
                  bg=BG_DARK, fg=TEXT_MUTED).pack(pady=(2, 0))
 
         tk.Frame(self, bg="#2a2a2a", height=1).pack(fill="x", padx=40, pady=24)
