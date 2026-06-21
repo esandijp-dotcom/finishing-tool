@@ -62,13 +62,14 @@ class InstallerApp(tk.Tk):
         self.title("Finishing Tool Installer")
         self.configure(bg=BG_DARK)
         self.resizable(False, False)
+        self.attributes("-alpha", 0)  # invisible until positioned
         self._build_ui()
-        # Center on screen and bring to front
         self.update_idletasks()
         w, h = 520, 580
         x = (self.winfo_screenwidth() // 2) - (w // 2)
         y = (self.winfo_screenheight() // 2) - (h // 2)
         self.geometry(f"{w}x{h}+{x}+{y}")
+        self.attributes("-alpha", 1)  # now show, already centered
         self.lift()
         self.focus_force()
 
@@ -112,8 +113,12 @@ class InstallerApp(tk.Tk):
         log_frame.pack_propagate(False)
         self._log_box = tk.Text(log_frame, font=("SF Mono", 10), bg="#111111",
                                 fg=TEXT_MUTED, relief="flat", bd=0,
-                                state="disabled", wrap="word")
+                                state="disabled", wrap="word",
+                                cursor="arrow", takefocus=0)
         self._log_box.pack(fill="both", expand=True)
+        self._log_box.bind("<Button-1>", lambda e: "break")
+        self._log_box.bind("<B1-Motion>", lambda e: "break")
+        self._log_box.configure(selectbackground="#111111", selectforeground=TEXT_MUTED)
 
         # Single button area — Install becomes Launch when done
         self._btn_frame = tk.Frame(self, bg=BG_DARK, height=60)
