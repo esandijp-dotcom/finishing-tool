@@ -63,6 +63,15 @@ class InstallerApp(tk.Tk):
         self.configure(bg=BG_DARK)
         self.resizable(False, False)
         self._build_ui()
+        # Center on screen and bring to front
+        self.update_idletasks()
+        w, h = 520, 580
+        x = (self.winfo_screenwidth() // 2) - (w // 2)
+        y = (self.winfo_screenheight() // 2) - (h // 2)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.lift()
+        self.attributes("-topmost", True)
+        self.after(200, lambda: self.attributes("-topmost", False))
 
     def _build_ui(self):
         tk.Label(self, text="Finishing Tool", font=("SF Pro Display", 26, "bold"),
@@ -99,25 +108,27 @@ class InstallerApp(tk.Tk):
         tk.Label(self, textvariable=self._status, font=("SF Pro Display", 11),
                  bg=BG_DARK, fg=TEXT_MUTED).pack(pady=(10, 0))
 
-        log_frame = tk.Frame(self, bg=BG_DARK)
-        log_frame.pack(fill="both", expand=True, padx=40, pady=10)
+        log_frame = tk.Frame(self, bg=BG_DARK, height=100)
+        log_frame.pack(fill="x", padx=40, pady=10)
+        log_frame.pack_propagate(False)
         self._log_box = tk.Text(log_frame, font=("SF Mono", 10), bg="#111111",
-                                fg=TEXT_MUTED, relief="flat", bd=0, height=6,
+                                fg=TEXT_MUTED, relief="flat", bd=0,
                                 state="disabled", wrap="word")
         self._log_box.pack(fill="both", expand=True)
 
-        btn_frame = tk.Frame(self, bg=BG_DARK)
-        btn_frame.pack(pady=20)
-        self._install_btn = _rounded_btn(btn_frame, "Install", self._start_install,
-                                          width=160, height=36)
-        self._install_btn.pack()
+        # Single button area — Install becomes Launch when done
+        self._btn_frame = tk.Frame(self, bg=BG_DARK, height=60)
+        self._btn_frame.pack(fill="x", pady=12)
+        self._btn_frame.pack_propagate(False)
 
-        self._launch_frame = tk.Frame(self, bg=BG_DARK)
-        self._launch_btn = _rounded_btn(self._launch_frame, "Launch Finishing Tool",
+        self._install_btn = _rounded_btn(self._btn_frame, "Install", self._start_install,
+                                          width=140, height=34)
+        self._install_btn.place(relx=0.5, rely=0.5, anchor="center")
+
+        self._launch_btn = _rounded_btn(self._btn_frame, "Launch Finishing Tool",
                                          self._launch_app, bg=SUCCESS, fg="#000000",
-                                         width=220, height=36,
+                                         width=200, height=34,
                                          hover="#6fcf6f", press="#2d8a2d")
-        self._launch_btn.pack()
 
     def _log(self, msg):
         def _do():
@@ -315,8 +326,8 @@ class InstallerApp(tk.Tk):
             self._set_status(f"Installation failed: {e}")
 
     def _show_done(self):
-        self._install_btn.pack_forget()
-        self._launch_frame.pack(pady=20)
+        self._install_btn.place_forget()
+        self._launch_btn.place(relx=0.5, rely=0.5, anchor="center")
 
     def _launch_app(self):
         subprocess.run(["open", "/Applications/Finishing Tool.app"], capture_output=True)
