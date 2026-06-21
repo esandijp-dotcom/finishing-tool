@@ -338,21 +338,28 @@ class InstallerApp(tk.Tk):
             build_script = os.path.join(build_dir, "build_and_install.sh")
             os.chmod(build_script, 0o755)
 
+            build_env = env.copy()
+            build_env["PATH"] = (
+                "/Library/Frameworks/Python.framework/Versions/3.13/bin:"
+                "/opt/homebrew/bin:/usr/local/bin:" + build_env.get("PATH", "")
+            )
             proc = subprocess.Popen(
                 ["/bin/bash", build_script],
                 cwd=build_dir,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                env=env
+                env=build_env
             )
             for line in proc.stdout:
-                self._log(line.rstrip())
+                stripped = line.rstrip()
+                if stripped:
+                    self._log(stripped)
             proc.wait()
 
             if proc.returncode != 0:
                 self._set_step(3, "error")
-                self._set_status("Build failed — check log.")
+                self._set_status(f"Build failed (exit code {proc.returncode}) — check log.")
                 return
 
             app_bundle = "/Applications/Finishing Tool.app"
