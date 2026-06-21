@@ -2270,9 +2270,12 @@ class VFXExporterApp(tk.Tk):
         """Silently check GitHub for a newer version."""
         def task():
             try:
-                import urllib.request, json
-                with urllib.request.urlopen(VERSION_URL, timeout=5) as r:
-                    data = json.loads(r.read().decode())
+                import urllib.request, json, ssl
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                req = urllib.request.urlopen(VERSION_URL, context=ctx, timeout=10)
+                data = json.loads(req.read().decode())
                 remote = data.get("version", "0")
                 notes  = data.get("release_notes", "")
                 def _parse(v):
@@ -2280,8 +2283,8 @@ class VFXExporterApp(tk.Tk):
                     except: return (0,)
                 if _parse(remote) > _parse(APP_VERSION):
                     self.after(0, lambda: self._show_update_banner(remote, notes, data.get("download_url", DOWNLOAD_URL)))
-            except Exception:
-                pass  # Silently fail — no internet is fine
+            except Exception as e:
+                print(f"Update check failed: {e}", flush=True)
         threading.Thread(target=task, daemon=True).start()
 
     def _show_update_banner(self, remote_version, notes, download_url):
@@ -2292,13 +2295,15 @@ class VFXExporterApp(tk.Tk):
                        font=("SF Pro Display", 11), bg="#1a3a1a", fg="#6fcf6f", padx=12, pady=6)
         msg.pack(side="left")
         def _update():
-            import urllib.request
+            import urllib.request, ssl
             self._log(f"Downloading v{remote_version}...", "muted")
             try:
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
                 script_path = os.path.abspath(__file__)
-                with urllib.request.urlopen(download_url, timeout=30) as r:
-                    new_code = r.read()
-                # Write new version
+                req = urllib.request.urlopen(download_url, context=ctx, timeout=30)
+                new_code = req.read()
                 with open(script_path, "wb") as f:
                     f.write(new_code)
                 self._log(f"✓ Updated to v{remote_version}. Restarting...", "success")
