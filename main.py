@@ -2347,17 +2347,22 @@ class VFXExporterApp(tk.Tk):
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
+
             script_path = os.path.abspath(__file__)
-            # Also download new version.json alongside main.py
-            vpath = os.path.join(os.path.dirname(script_path), "version.json")
-            vurl = VERSION_URL
-            vreq = urllib.request.urlopen(vurl, context=ctx, timeout=30)
+            resources_dir = os.path.dirname(script_path)
+            vpath = os.path.join(resources_dir, "version.json")
+
+            # Download version.json — same path resolution as main.py
+            vreq = urllib.request.urlopen(VERSION_URL, context=ctx, timeout=30)
             with open(vpath, "wb") as f:
                 f.write(vreq.read())
+            self._log(f"  version.json saved ✓", "muted")
+
+            # Download main.py
             req = urllib.request.urlopen(download_url, context=ctx, timeout=30)
-            new_code = req.read()
             with open(script_path, "wb") as f:
-                f.write(new_code)
+                f.write(req.read())
+            self._log(f"  main.py saved ✓", "muted")
             self._log(f"✓ Updated to v{remote_version}. Restarting...", "success")
             # Find the .app bundle by walking up from script_path
             path = os.path.abspath(script_path)
@@ -2367,10 +2372,21 @@ class VFXExporterApp(tk.Tk):
                 if path.endswith(".app"):
                     app_bundle = path
                     break
-            if app_bundle and os.path.exists(app_bundle):
-                self.after(1500, lambda b=app_bundle: (os.system(f'open "{b}"'), self.after(500, self.destroy)))
-            else:
-                self.after(1500, lambda: os.execv(sys.executable, [sys.executable, script_path]))
+            def _restart():
+                if app_bundle and os.path.exists(app_bundle):
+                    # Use the app's own launcher executable directly
+                    # -n forces a new instance even if already running
+                    import subprocess
+                    app_name = os.path.splitext(os.path.basename(app_bundle))[0]
+                    launcher = os.path.join(app_bundle, "Contents", "MacOS", app_name)
+                    if os.path.exists(launcher):
+                        subprocess.Popen([launcher])
+                    else:
+                        os.system(f'open -n "{app_bundle}"')
+                else:
+                    os.execv(sys.executable, [sys.executable, script_path])
+                self.after(500, self.destroy)
+            self.after(1500, _restart)
         except Exception as e:
             self._log(f"✗ Update failed: {e}", "error")
 
