@@ -1,15 +1,16 @@
 # Finishing Tool v1.0
 
-## Build the installer .app (run once on your Mac)
-  cd '/Users/juanesandi/Downloads/Finishing Tool v1.0 - GitHub Files'
-  pyinstaller --onefile --windowed --name "Finishing Tool Installer" --icon icon.png --add-data "main.py:." --add-data "thinking.gif:." --add-data "icon.png:." installer.py
+## To build + install (you, on your Mac):
+  cd '/path/to/this/folder'
+  bash build_and_install.sh
 
-App will be at: dist/Finishing Tool Installer.app
+## Files needed in same folder:
+  main.py, setup.py, build_icon.py, icon.png, thinking.gif, version.json
 
-## Upload to GitHub (github.com/esandijp-dotcom/finishing-tool)
-main.py, installer.py, thinking.gif, icon.png, version.json
+## To upload to GitHub (github.com/esandijp-dotcom/finishing-tool):
+  main.py, installer.py, thinking.gif, icon.png, version.json
 
-## Releasing updates
-1. Push new main.py to GitHub
-2. Bump version in version.json
-3. Users see green update banner on next launch
+## Releasing updates:
+  1. Push new main.py to GitHub
+  2. Bump version in version.json
+  3. Users see green update banner on next launch
