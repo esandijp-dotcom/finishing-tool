@@ -120,11 +120,9 @@ class InstallerApp(tk.Tk):
         self._log_box = tk.Text(log_frame, font=("SF Mono", 10), bg="#111111",
                                 fg=TEXT_MUTED, relief="flat", bd=0,
                                 state="disabled", wrap="word",
-                                cursor="arrow", takefocus=0)
+                                highlightthickness=0)
         self._log_box.pack(fill="both", expand=True)
-        self._log_box.bind("<Button-1>", lambda e: "break")
-        self._log_box.bind("<B1-Motion>", lambda e: "break")
-        self._log_box.configure(selectbackground="#111111", selectforeground=TEXT_MUTED)
+        self._log_box.configure(selectbackground="#333333", selectforeground="#ffffff")
 
         # Single button area — Install becomes Launch when done
         self._btn_frame = tk.Frame(self, bg=BG_DARK, height=60)
@@ -344,17 +342,19 @@ class InstallerApp(tk.Tk):
                 "/opt/homebrew/bin:/usr/local/bin:" + build_env.get("PATH", "")
             )
             proc = subprocess.Popen(
-                ["/bin/bash", build_script],
+                ["/bin/bash", "-u", build_script],
                 cwd=build_dir,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                bufsize=1,
                 env=build_env
             )
-            for line in proc.stdout:
+            for line in iter(proc.stdout.readline, ""):
                 stripped = line.rstrip()
                 if stripped:
                     self._log(stripped)
+            proc.stdout.close()
             proc.wait()
 
             if proc.returncode != 0:
