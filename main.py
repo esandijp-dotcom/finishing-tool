@@ -1681,7 +1681,7 @@ class VFXExporterApp(tk.Tk):
         log_scroll = tk.Scrollbar(log_p, bg=BG_PANEL)
         log_scroll.pack(side="right", fill="y")
         self.log_box = tk.Text(log_p, font=FONT_MONO, bg=BG_INPUT, fg=TEXT_PRIMARY,
-                                relief="flat", bd=0, height=16, width=1,
+                                relief="flat", bd=0, height=8, width=1,
                                 highlightthickness=0,
                                 yscrollcommand=log_scroll.set, state="disabled", wrap="word")
         self.log_box.pack(fill="both", expand=True, padx=8, pady=8)
@@ -2835,6 +2835,11 @@ class VFXExporterApp(tk.Tk):
         self._export_started = False
         if hasattr(self, '_show_pill'):
             self._update_show_pill("")
+        # Resize window back to natural height after clearing episode tags
+        def _resize_after_reset():
+            self.update_idletasks()
+            self.geometry(f"950x{self.winfo_reqheight()}")
+        self.after(100, _resize_after_reset)
         self._all_disabled = False
         self.btn_toggle_all.config(text="DISABLE ALL", bg=BG_INPUT, fg=TEXT_PRIMARY)
         self._disabled_episodes.clear()
