@@ -2310,42 +2310,58 @@ class VFXExporterApp(tk.Tk):
 
     def _show_update_banner(self, remote_version, notes, download_url):
         """Show a dismissable update banner below the title."""
-        banner = tk.Frame(self._main_frame, bg="#1a3a1a")
+        BNR_BG  = "#252525"
+        BNR_FG  = "#aaaaaa"
+        BTN_BG  = "#333333"
+        BTN_HOV = "#444444"
+        BTN_PRS = "#222222"
+
+        banner = tk.Frame(self._main_frame, bg=BNR_BG)
         banner.pack(fill="x", pady=(0, 8))
-        msg = tk.Label(banner, text=f"✦ Version {remote_version} available — {notes}",
-                       font=("SF Pro Display", 11), bg="#1a3a1a", fg="#6fcf6f", padx=12, pady=6)
-        msg.pack(side="left")
-        def _update():
-            import urllib.request, ssl
-            self._log(f"Downloading v{remote_version}...", "muted")
-            try:
-                ctx = ssl.create_default_context()
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl.CERT_NONE
-                script_path = os.path.abspath(__file__)
-                req = urllib.request.urlopen(download_url, context=ctx, timeout=30)
-                new_code = req.read()
-                with open(script_path, "wb") as f:
-                    f.write(new_code)
-                self._log(f"✓ Updated to v{remote_version}. Restarting...", "success")
-                self.after(1500, lambda: os.execv(sys.executable, [sys.executable, script_path]))
-            except Exception as e:
-                self._log(f"✗ Update failed: {e}", "error")
-        def _make_banner_btn(parent, text, cmd, fg="#6fcf6f"):
-            btn_bg   = "#2a2a2a"
-            btn_hov  = "#3a3a3a"
-            btn_prs  = "#1a1a1a"
+
+        def _make_banner_btn(parent, text, cmd):
             b = tk.Label(parent, text=text, font=("SF Pro Display", 11),
-                         bg=btn_bg, fg=fg, padx=10, pady=4, cursor="")
-            b.bind("<Enter>",           lambda e: b.config(bg=btn_hov))
-            b.bind("<Leave>",           lambda e: b.config(bg=btn_bg))
-            b.bind("<ButtonPress-1>",   lambda e: b.config(bg=btn_prs))
-            b.bind("<ButtonRelease-1>", lambda e: (b.config(bg=btn_hov), cmd()))
+                         bg=BTN_BG, fg=BNR_FG, padx=10, pady=4, cursor="")
+            b.bind("<Enter>",           lambda e: b.config(bg=BTN_HOV))
+            b.bind("<Leave>",           lambda e: b.config(bg=BTN_BG))
+            b.bind("<ButtonPress-1>",   lambda e: b.config(bg=BTN_PRS))
+            b.bind("<ButtonRelease-1>", lambda e: (b.config(bg=BTN_HOV), cmd()))
             return b
-        _make_banner_btn(banner, "Update Now", _update, fg="#6fcf6f").pack(
-            side="right", padx=(4, 8), pady=4)
-        _make_banner_btn(banner, "✕", banner.destroy, fg="#6fcf6f").pack(
-            side="right", padx=4, pady=4)
+
+        # ✕ on the left
+        _make_banner_btn(banner, "✕", banner.destroy).pack(side="left", padx=(8, 4), pady=4)
+
+        # Message text
+        tk.Label(banner, text=f"✦ Version {remote_version} available — {notes}",
+                 font=("SF Pro Display", 11), bg=BNR_BG, fg=BNR_FG, padx=8, pady=6
+                 ).pack(side="left")
+
+        # UPDATE NOW on the right
+        _make_banner_btn(banner, "UPDATE NOW", lambda: self._do_update(remote_version, download_url)
+                         ).pack(side="right", padx=(4, 8), pady=4)
+
+    def _do_update(self, remote_version, download_url):
+        import urllib.request, ssl
+        self._log(f"Downloading v{remote_version}...", "muted")
+        try:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            script_path = os.path.abspath(__file__)
+            # Also download new version.json alongside main.py
+            vpath = os.path.join(os.path.dirname(script_path), "version.json")
+            vurl = VERSION_URL
+            vreq = urllib.request.urlopen(vurl, context=ctx, timeout=30)
+            with open(vpath, "wb") as f:
+                f.write(vreq.read())
+            req = urllib.request.urlopen(download_url, context=ctx, timeout=30)
+            new_code = req.read()
+            with open(script_path, "wb") as f:
+                f.write(new_code)
+            self._log(f"✓ Updated to v{remote_version}. Restarting...", "success")
+            self.after(1500, lambda: os.execv(sys.executable, [sys.executable, script_path]))
+        except Exception as e:
+            self._log(f"✗ Update failed: {e}", "error")
 
     def _enable_reset_btn(self):
         """Enable the RESET ALL button."""
