@@ -2310,18 +2310,18 @@ class VFXExporterApp(tk.Tk):
 
     def _show_update_banner(self, remote_version, notes, download_url):
         """Show a dismissable update banner below the title."""
-        BNR_BG  = "#252525"
-        BNR_FG  = "#aaaaaa"
-        BTN_BG  = "#333333"
-        BTN_HOV = "#444444"
-        BTN_PRS = "#222222"
+        BNR_BG  = "#1a3a1a"
+        BNR_FG  = "#6fcf6f"
+        BTN_BG  = "#2a6e2a"
+        BTN_HOV = "#3a8e3a"
+        BTN_PRS = "#1a5e1a"
 
         banner = tk.Frame(self._main_frame, bg=BNR_BG)
         banner.pack(fill="x", pady=(0, 8))
 
         def _make_banner_btn(parent, text, cmd):
             b = tk.Label(parent, text=text, font=("SF Pro Display", 11),
-                         bg=BTN_BG, fg=BNR_FG, padx=10, pady=4, cursor="")
+                         bg=BTN_BG, fg="#ffffff", padx=10, pady=4, cursor="")
             b.bind("<Enter>",           lambda e: b.config(bg=BTN_HOV))
             b.bind("<Leave>",           lambda e: b.config(bg=BTN_BG))
             b.bind("<ButtonPress-1>",   lambda e: b.config(bg=BTN_PRS))
@@ -2359,7 +2359,18 @@ class VFXExporterApp(tk.Tk):
             with open(script_path, "wb") as f:
                 f.write(new_code)
             self._log(f"✓ Updated to v{remote_version}. Restarting...", "success")
-            self.after(1500, lambda: os.execv(sys.executable, [sys.executable, script_path]))
+            # Find the .app bundle by walking up from script_path
+            path = os.path.abspath(script_path)
+            app_bundle = None
+            for _ in range(6):
+                path = os.path.dirname(path)
+                if path.endswith(".app"):
+                    app_bundle = path
+                    break
+            if app_bundle and os.path.exists(app_bundle):
+                self.after(1500, lambda b=app_bundle: (os.system(f'open "{b}"'), self.after(500, self.destroy)))
+            else:
+                self.after(1500, lambda: os.execv(sys.executable, [sys.executable, script_path]))
         except Exception as e:
             self._log(f"✗ Update failed: {e}", "error")
 
