@@ -4,7 +4,7 @@ a = Analysis(
     ['installer.py'],
     pathex=[],
     binaries=[],
-    datas=[('icon.png', '.')],
+    datas=[('icon.png', '.'), ('01_STRINGOUT_Render.xml', '.'), ('02_COLORED_VFX_4444_XQ_Render.xml', '.'), ('03_PREMIERE_XML_Render.xml', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

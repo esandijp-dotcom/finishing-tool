@@ -16,7 +16,10 @@ ERROR        = "#E05555"
 
 GITHUB_BASE  = "https://raw.githubusercontent.com/esandijp-dotcom/finishing-tool/main"
 FILES        = ["main.py", "thinking.gif", "icon.png", "version.json",
-                "build_and_install.sh", "setup.py", "build_icon.py"]
+                "build_and_install.sh", "setup.py", "build_icon.py",
+                "01_STRINGOUT_Render.xml",
+                "02_COLORED_VFX_4444_XQ_Render.xml",
+                "03_PREMIERE_XML_Render.xml"]
 
 STEPS = [
     "Checking for Homebrew...",
@@ -288,6 +291,23 @@ class InstallerApp(tk.Tk):
                     self._log(f"  ✗ {e}")
                     return
             self._log("All files downloaded ✓")
+
+            # Install DaVinci Resolve render presets
+            preset_dst_dir = os.path.expanduser(
+                "~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Presets/Render")
+            os.makedirs(preset_dst_dir, exist_ok=True)
+            for preset_name in ["01_STRINGOUT_Render.xml",
+                                 "02_COLORED_VFX_4444_XQ_Render.xml",
+                                 "03_PREMIERE_XML_Render.xml"]:
+                preset_src = os.path.join(build_dir, preset_name)
+                preset_dst = os.path.join(preset_dst_dir, preset_name)
+                try:
+                    shutil.copy2(preset_src, preset_dst)
+                    self._log(f"  {preset_name} ✓")
+                except Exception as e:
+                    self._log(f"  ⚠ Could not install {preset_name}: {e}")
+            self._log("Render presets installed ✓")
+
             self._set_step(2, "done")
             self._set_progress(3/total)
 
