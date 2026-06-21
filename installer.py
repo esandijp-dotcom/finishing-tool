@@ -62,14 +62,17 @@ class InstallerApp(tk.Tk):
         self.title("Finishing Tool Installer")
         self.configure(bg=BG_DARK)
         self.resizable(False, False)
-        self.attributes("-alpha", 0)  # invisible until positioned
+        self.attributes("-alpha", 0)
+        self.withdraw()
         self._build_ui()
         self.update_idletasks()
         w, h = 520, 580
         x = (self.winfo_screenwidth() // 2) - (w // 2)
         y = (self.winfo_screenheight() // 2) - (h // 2)
         self.geometry(f"{w}x{h}+{x}+{y}")
-        self.attributes("-alpha", 1)  # now show, already centered
+        self.update_idletasks()
+        self.deiconify()
+        self.attributes("-alpha", 1)
         self.lift()
         self.focus_force()
 
