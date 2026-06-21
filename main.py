@@ -1208,13 +1208,18 @@ class VFXExporterApp(tk.Tk):
         super().__init__()
         self.title("Finishing Tool")
         self.configure(bg=BG_OUTER)
-        # Match title bar to app on macOS
         try:
             from ctypes import windll
         except ImportError:
-            pass  # macOS - title bar color not directly controllable via tkinter
+            pass
+        # Fix Retina/HiDPI scaling when launched as .app bundle
+        try:
+            self.tk.call("tk", "scaling", 1.0)
+        except Exception:
+            pass
         self.resizable(True, True)
         self.minsize(860, 750)
+        self.geometry("900x820")
 
         self.engine = None
         self.episode_markers = []
