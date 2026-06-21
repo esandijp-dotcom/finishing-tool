@@ -7,9 +7,20 @@ import sys
 import os
 
 # ─── Version & update config ────────────────────────────────────────────────
-APP_VERSION     = "1.0"
 VERSION_URL     = "https://raw.githubusercontent.com/esandijp-dotcom/finishing-tool/main/version.json"
 DOWNLOAD_URL    = "https://raw.githubusercontent.com/esandijp-dotcom/finishing-tool/main/main.py"
+
+def _load_local_version():
+    """Read version from version.json next to this script."""
+    try:
+        import json as _json
+        _vpath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "version.json")
+        with open(_vpath) as _f:
+            return _json.load(_f).get("version", "1.0")
+    except Exception:
+        return "1.0"
+
+APP_VERSION = _load_local_version()
 # ─────────────────────────────────────────────────────────────────────────────
 import re
 import subprocess
@@ -1269,6 +1280,7 @@ class VFXExporterApp(tk.Tk):
         self._build_ui()
         self.after(200, self._disable_reset_btn)
         self._check_deps_on_start()
+        self.after(2000, self._check_for_updates)
 
     def _build_ui(self):
         main = tk.Frame(self, bg=BG_OUTER, padx=28, pady=24)
@@ -2276,20 +2288,24 @@ class VFXExporterApp(tk.Tk):
                 ctx.verify_mode = ssl.CERT_NONE
                 req = urllib.request.urlopen(VERSION_URL, context=ctx, timeout=10)
                 raw = req.read().decode()
-                print(f"Version check response: {raw}", flush=True)
+                with open(os.path.expanduser("~/Desktop/ft_update_log.txt"), "a") as lf:
+                    lf.write(f"Response: {raw}\n")
                 data = json.loads(raw)
                 remote = data.get("version", "0")
                 notes  = data.get("release_notes", "")
-                print(f"Remote: {remote}, Local: {APP_VERSION}", flush=True)
+                with open(os.path.expanduser("~/Desktop/ft_update_log.txt"), "a") as lf:
+                    lf.write(f"Remote: {remote}, Local: {APP_VERSION}\n")
                 def _parse(v):
                     try: return tuple(int(x) for x in v.split("."))
                     except: return (0,)
                 if _parse(remote) > _parse(APP_VERSION):
                     self.after(0, lambda: self._show_update_banner(remote, notes, data.get("download_url", DOWNLOAD_URL)))
                 else:
-                    print(f"No update needed ({remote} <= {APP_VERSION})", flush=True)
+                    with open(os.path.expanduser("~/Desktop/ft_update_log.txt"), "a") as lf:
+                        lf.write(f"No update needed: {remote} <= {APP_VERSION}\n")
             except Exception as e:
-                print(f"Update check failed: {e}", flush=True)
+                with open(os.path.expanduser("~/Desktop/ft_update_log.txt"), "a") as lf:
+                    lf.write(f"Update check failed: {e}\n")
         threading.Thread(target=task, daemon=True).start()
 
     def _show_update_banner(self, remote_version, notes, download_url):
@@ -2315,12 +2331,21 @@ class VFXExporterApp(tk.Tk):
                 self.after(1500, lambda: os.execv(sys.executable, [sys.executable, script_path]))
             except Exception as e:
                 self._log(f"✗ Update failed: {e}", "error")
-        tk.Button(banner, text="Update Now", font=("SF Pro Display", 11, "bold"),
-                  bg="#2a6e2a", fg="#FFFFFF", relief="flat", bd=0, padx=12, pady=4,
-                  cursor="", command=_update).pack(side="right", padx=8, pady=4)
-        tk.Button(banner, text="✕", font=("SF Pro Display", 11),
-                  bg="#1a3a1a", fg="#6fcf6f", relief="flat", bd=0, padx=8,
-                  cursor="", command=banner.destroy).pack(side="right", pady=4)
+        def _make_banner_btn(parent, text, cmd, fg="#6fcf6f"):
+            btn_bg   = "#2a2a2a"
+            btn_hov  = "#3a3a3a"
+            btn_prs  = "#1a1a1a"
+            b = tk.Label(parent, text=text, font=("SF Pro Display", 11),
+                         bg=btn_bg, fg=fg, padx=10, pady=4, cursor="")
+            b.bind("<Enter>",           lambda e: b.config(bg=btn_hov))
+            b.bind("<Leave>",           lambda e: b.config(bg=btn_bg))
+            b.bind("<ButtonPress-1>",   lambda e: b.config(bg=btn_prs))
+            b.bind("<ButtonRelease-1>", lambda e: (b.config(bg=btn_hov), cmd()))
+            return b
+        _make_banner_btn(banner, "Update Now", _update, fg="#6fcf6f").pack(
+            side="right", padx=(4, 8), pady=4)
+        _make_banner_btn(banner, "✕", banner.destroy, fg="#6fcf6f").pack(
+            side="right", padx=4, pady=4)
 
     def _enable_reset_btn(self):
         """Enable the RESET ALL button."""
