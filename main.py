@@ -1438,16 +1438,17 @@ class VFXExporterApp(tk.Tk):
             canvas.create_text(tw//2, th//2, text=label,
                               font=("SF Pro Display", 12, fw), fill=col)
 
-        def _make_tab(label, tab_id):
+        def _make_tab(label, tab_id, disabled=False):
             tw, th = 130, 36
             c = tk.Canvas(tab_bar, width=tw, height=th+1, bg=BG_OUTER, highlightthickness=0)
             c.pack(side="left", padx=(0, 2))
             self._tab_canvases[tab_id] = (c, label)
             _draw_tab(c, label, tab_id == self._active_tab)
-            c.bind("<Button-1>", lambda e, tid=tab_id: self._switch_tab(tid))
+            if not disabled:
+                c.bind("<Button-1>", lambda e, tid=tab_id: self._switch_tab(tid))
 
         _make_tab("VFX EXPORT", "vfx")
-        _make_tab("TEST", "test")
+        _make_tab("—", "test", disabled=True)
         self._draw_tab_fn = lambda: [_draw_tab(c, l, tid == self._active_tab)
                                       for tid, (c, l) in self._tab_canvases.items()]
 
@@ -1464,7 +1465,7 @@ class VFXExporterApp(tk.Tk):
         self._build_vfx_tab(self._vfx_content)
 
         self._test_content = tk.Frame(self.tab_content_frame, bg=BG_DARK, padx=16, pady=12)
-        self._section_label(self._test_content, "TEST")
+        self._section_label(self._test_content, "—")
         test_panel = self._panel(self._test_content)
         tk.Label(test_panel, text="Hello", font=FONT_MAIN, bg=BG_PANEL,
                  fg=TEXT_PRIMARY).pack(anchor="w")

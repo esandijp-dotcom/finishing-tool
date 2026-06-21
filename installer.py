@@ -274,10 +274,17 @@ class InstallerApp(tk.Tk):
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
 
+            REQUIRED_FILES = ["main.py", "thinking.gif", "icon.png", "version.json",
+                              "build_and_install.sh", "setup.py", "build_icon.py"]
+            PRESET_FILES   = ["01_STRINGOUT Render.xml",
+                              "02_COLORED VFX 4444 XQ Render.xml",
+                              "03_PREMIERE XML Render.xml"]
+
             build_dir = os.path.expanduser("~/Applications/FinishingToolBuild")
             os.makedirs(build_dir, exist_ok=True)
 
-            for fname in FILES:
+            # Download required files — fail hard if any missing
+            for fname in REQUIRED_FILES:
                 url = f"{GITHUB_BASE}/{fname}"
                 dst = os.path.join(build_dir, fname)
                 self._log(f"  Downloading {fname}...")
@@ -290,15 +297,27 @@ class InstallerApp(tk.Tk):
                     self._set_status(f"Download failed: {fname}")
                     self._log(f"  ✗ {e}")
                     return
+
+            # Download preset files — warn but continue if missing
+            for fname in PRESET_FILES:
+                url = f"{GITHUB_BASE}/{fname.replace(' ', '%20')}"
+                dst = os.path.join(build_dir, fname)
+                self._log(f"  Downloading {fname}...")
+                try:
+                    req = urllib.request.urlopen(url, context=ctx, timeout=30)
+                    with open(dst, "wb") as f:
+                        f.write(req.read())
+                except Exception as e:
+                    self._log(f"  ⚠ Preset not found, skipping: {fname}")
             self._log("All files downloaded ✓")
 
             # Install DaVinci Resolve render presets
             preset_dst_dir = os.path.expanduser(
                 "~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Presets/Render")
             os.makedirs(preset_dst_dir, exist_ok=True)
-            for preset_name in ["01_STRINGOUT_Render.xml",
-                                 "02_COLORED_VFX_4444_XQ_Render.xml",
-                                 "03_PREMIERE_XML_Render.xml"]:
+            for preset_name in ["01_STRINGOUT Render.xml",
+                                 "02_COLORED VFX 4444 XQ Render.xml",
+                                 "03_PREMIERE XML Render.xml"]:
                 preset_src = os.path.join(build_dir, preset_name)
                 preset_dst = os.path.join(preset_dst_dir, preset_name)
                 try:
