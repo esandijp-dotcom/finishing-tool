@@ -1248,8 +1248,7 @@ class VFXExporterApp(tk.Tk):
             self.tk.call("tk", "scaling", 1.0)
         except Exception:
             pass
-        self.resizable(True, True)
-        self.minsize(860, 750)
+        self.resizable(False, False)
 
         self.engine = None
         self.episode_markers = []
