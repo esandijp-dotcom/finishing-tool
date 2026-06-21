@@ -1219,7 +1219,6 @@ class VFXExporterApp(tk.Tk):
             pass
         self.resizable(True, True)
         self.minsize(860, 750)
-        self.geometry("900x820")
 
         self.engine = None
         self.episode_markers = []
