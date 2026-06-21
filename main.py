@@ -1698,6 +1698,7 @@ class VFXExporterApp(tk.Tk):
             self._log("All clips already exported.", "success")
             return
         self._log(f"Resuming from clip {start_index + 1}/{len(self.export_list)}.", "muted")
+        self._set_btn_state(self.btn_reset_export, False)  # Disable Reset Export while running
         self.btn_export._text = "Export"
         self._set_btn_state(self.btn_export, False)
         self._set_stop_button()  # Ensure STOP shows immediately before thread starts
