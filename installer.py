@@ -70,8 +70,7 @@ class InstallerApp(tk.Tk):
         y = (self.winfo_screenheight() // 2) - (h // 2)
         self.geometry(f"{w}x{h}+{x}+{y}")
         self.lift()
-        self.attributes("-topmost", True)
-        self.after(200, lambda: self.attributes("-topmost", False))
+        self.focus_force()
 
     def _build_ui(self):
         tk.Label(self, text="Finishing Tool", font=("SF Pro Display", 26, "bold"),
