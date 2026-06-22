@@ -651,48 +651,53 @@ def find_output_folder(show_code, show_acronym):
     """
     Auto-detect output folder by searching mounted volumes for SHOWCODE.
     Structure: /Volumes/SHOWCODE_*/SHOWCODE_*_EDIT/<folder with TURNOVER>/<folder with TO VFX>
+    Show code may come in as LA35, V-LA35, I-LA35 etc.
     """
-    import glob
+    import glob, re
 
     if not show_code:
         return None
 
-    # Search /Volumes for drives starting with show_code
-    volumes = glob.glob(f"/Volumes/{show_code}_*")
-    if not volumes:
-        return None
+    # Strip any prefix like V-, I-, etc. to get the base code (e.g. LA35)
+    base_code = re.sub(r'^[A-Z]-', '', show_code.strip())
 
-    for volume in sorted(volumes):
-        # Look for SHOWCODE_*_EDIT folder inside
-        edit_folders = glob.glob(f"{volume}/{show_code}_*_EDIT")
-        if not edit_folders:
-            edit_folders = glob.glob(f"{volume}/{show_code}_{show_acronym}_EDIT")
-        if not edit_folders:
+    # Build list of code variants to search for
+    prefixes = ["", "V-", "I-"]
+    code_variants = list(dict.fromkeys([show_code] + [f"{p}{base_code}" for p in prefixes]))
+
+    for code in code_variants:
+        volumes = glob.glob(f"/Volumes/{code}_*")
+        if not volumes:
             continue
-        for edit_folder in sorted(edit_folders):
-            # Find folder with TURNOVER in name
-            try:
-                turnover_folders = [
-                    os.path.join(edit_folder, d)
-                    for d in os.listdir(edit_folder)
-                    if "TURNOVER" in d.upper() and
-                    os.path.isdir(os.path.join(edit_folder, d))
-                ]
-            except Exception:
-                continue
-            for turnover_folder in sorted(turnover_folders):
-                # Find folder with TO VFX in name inside turnover folder
+        for volume in sorted(volumes):
+            # Look for *_EDIT folder — try both the full show_code and base_code
+            edit_folders = (
+                glob.glob(f"{volume}/{code}_*_EDIT") or
+                glob.glob(f"{volume}/{base_code}_*_EDIT") or
+                glob.glob(f"{volume}/*_EDIT")
+            )
+            for edit_folder in sorted(edit_folders):
                 try:
-                    to_vfx_folders = [
-                        os.path.join(turnover_folder, d)
-                        for d in os.listdir(turnover_folder)
-                        if "TO VFX" in d.upper() and
-                        os.path.isdir(os.path.join(turnover_folder, d))
+                    turnover_folders = [
+                        os.path.join(edit_folder, d)
+                        for d in os.listdir(edit_folder)
+                        if "TURNOVER" in d.upper() and
+                        os.path.isdir(os.path.join(edit_folder, d))
                     ]
                 except Exception:
                     continue
-                for to_vfx in sorted(to_vfx_folders):
-                    return to_vfx
+                for turnover_folder in sorted(turnover_folders):
+                    try:
+                        to_vfx_folders = [
+                            os.path.join(turnover_folder, d)
+                            for d in os.listdir(turnover_folder)
+                            if "TO VFX" in d.upper() and
+                            os.path.isdir(os.path.join(turnover_folder, d))
+                        ]
+                    except Exception:
+                        continue
+                    for to_vfx in sorted(to_vfx_folders):
+                        return to_vfx
 
     return None
 
