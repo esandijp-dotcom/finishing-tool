@@ -2,7 +2,8 @@ from setuptools import setup
 
 APP = ['main.py']
 DATA_FILES = [
-    ('', ['thinking.gif', 'icon.png', 'version.json']),
+    ('', ['thinking.gif', 'icon.png', 'version.json',
+          'LIVE.epr', 'MARKETING.epr', 'SOCIAL MEDIA.epr', 'LIVE WITH SRTs.epr']),
 ]
 OPTIONS = {
     'argv_emulation': False,
@@ -22,10 +23,11 @@ OPTIONS = {
     },
     'packages': [
         'PIL', 'cv2', 'pytesseract', 'openpyxl', 'xlsxwriter', 'numpy',
-        'tkinter', 'urllib', 'threading', 'json',
+        'tkinter', 'urllib', 'threading', 'json', 'pymiere', 'requests',
     ],
     'includes': [
         'PIL', 'cv2', 'pytesseract', 'openpyxl', 'xlsxwriter', 'numpy', 'tkinter',
+        'pymiere', 'requests',
     ],
     'excludes': ['matplotlib', 'scipy', 'PyQt5', 'PyQt6'],
 }

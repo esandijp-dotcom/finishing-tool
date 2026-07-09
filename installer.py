@@ -299,6 +299,10 @@ class InstallerApp(tk.Tk):
 
             REQUIRED_FILES = ["main.py", "thinking.gif", "icon.png", "version.json",
                               "build_and_install.sh", "setup.py", "build_icon.py"]
+            # setup.py's py2app DATA_FILES bundles this into the app itself
+            # (Contents/Resources) — required, not optional, since the
+            # build would fail without it once referenced there.
+            AME_PRESET_FILES = ["LIVE.epr", "MARKETING.epr", "SOCIAL MEDIA.epr", "LIVE WITH SRTs.epr"]
             PRESET_FILES   = ["01_STRINGOUT Render.xml",
                               "02_COLORED VFX 4444 XQ Render.xml",
                               "03_PREMIERE XML Render.xml"]
@@ -309,6 +313,22 @@ class InstallerApp(tk.Tk):
             # Download required files — fail hard if any missing
             for fname in REQUIRED_FILES:
                 url = f"{GITHUB_BASE}/{fname}"
+                dst = os.path.join(build_dir, fname)
+                self._log(f"  Downloading {fname}...")
+                try:
+                    req = urllib.request.urlopen(url, context=ctx, timeout=30)
+                    with open(dst, "wb") as f:
+                        f.write(req.read())
+                except Exception as e:
+                    self._set_step(2, "error")
+                    self._set_status(f"Download failed: {fname}")
+                    self._log(f"  ✗ {e}")
+                    return
+
+            # Download the AME preset(s) bundled into the app — also fail
+            # hard, since setup.py's DATA_FILES references them by name.
+            for fname in AME_PRESET_FILES:
+                url = f"{GITHUB_BASE}/{fname.replace(' ', '%20')}"
                 dst = os.path.join(build_dir, fname)
                 self._log(f"  Downloading {fname}...")
                 try:
@@ -332,6 +352,23 @@ class InstallerApp(tk.Tk):
                         f.write(req.read())
                 except Exception as e:
                     self._log(f"  ⚠ Preset not found, skipping: {fname}")
+
+            # Pymiere Link — the CEP extension the Episode Export tab needs
+            # to reach Premiere Pro (build_and_install.sh installs it into
+            # Premiere once downloaded here). Warn but continue if missing —
+            # DaVinci/VFX-only machines don't need it, and build_and_install.sh
+            # itself already skips the install step gracefully without it.
+            for fname in ["pymiere_link.zxp"]:
+                url = f"{GITHUB_BASE}/{fname}"
+                dst = os.path.join(build_dir, fname)
+                self._log(f"  Downloading {fname}...")
+                try:
+                    req = urllib.request.urlopen(url, context=ctx, timeout=30)
+                    with open(dst, "wb") as f:
+                        f.write(req.read())
+                except Exception as e:
+                    self._log(f"  ⚠ {fname} not found, skipping (Episode Export/Premiere "
+                              f"tab won't be able to connect without it).")
             self._log("All files downloaded ✓")
 
             # Install DaVinci Resolve render presets
@@ -349,6 +386,29 @@ class InstallerApp(tk.Tk):
                 except Exception as e:
                     self._log(f"  ⚠ Could not install {preset_name}: {e}")
             self._log("Render presets installed ✓")
+
+            # Also install AME presets into AME's own Presets folder — the
+            # app already carries its own bundled copy (see
+            # setup.py/DATA_FILES) and uses that first, so this is a
+            # secondary convenience only: it makes the preset show up in
+            # AME's own UI too, for anyone who wants to pick it manually
+            # in there. Purely optional — skipped quietly if AME has never
+            # been launched on this machine (no version folder yet).
+            import glob as _glob
+            ame_preset_dirs = _glob.glob(os.path.expanduser(
+                "~/Documents/Adobe/Adobe Media Encoder/*/Presets"))
+            if ame_preset_dirs:
+                for fname in AME_PRESET_FILES:
+                    preset_src = os.path.join(build_dir, fname)
+                    for ame_dir in ame_preset_dirs:
+                        try:
+                            shutil.copy2(preset_src, os.path.join(ame_dir, fname))
+                            self._log(f"  {fname} → AME Presets ✓")
+                        except Exception as e:
+                            self._log(f"  ⚠ Could not install {fname} to AME: {e}")
+            else:
+                self._log("  ⚠ AME Presets folder not found — skipping "
+                           "(app uses its own bundled copy regardless).")
 
             self._set_step(2, "done")
             self._step_progress(3)
