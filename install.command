@@ -39,8 +39,35 @@ echo "  Tesseract ✓"
 
 # ── pip packages ─────────────────────────────────────────────────────────────
 echo "→ Installing Python packages..."
-$PYTHON -m pip install pillow opencv-python pytesseract openpyxl numpy --break-system-packages -q
+$PYTHON -m pip install pillow opencv-python pytesseract openpyxl xlsxwriter numpy pymiere requests --break-system-packages -q
 echo "  Packages ✓"
+
+# ── Pymiere Link extension (Episode Export tab needs this to reach Premiere) ─
+echo "→ Checking for Adobe Premiere Pro..."
+if system_profiler -detailLevel mini SPApplicationsDataType 2>/dev/null | grep -qi "Premiere Pro"; then
+    ZXP_PATH="$APP_DIR/pymiere_link.zxp"
+    curl -fsSL --insecure "$GITHUB/pymiere_link.zxp" -o "$ZXP_PATH" 2>/dev/null
+    if [ -f "$ZXP_PATH" ]; then
+        TMPDIR_CEP=$(mktemp -d)
+        EXMAN_DMG="$TMPDIR_CEP/ExManCmd_mac.dmg"
+        if curl -fsSL "https://download.macromedia.com/pub/extensionmanager/ExManCmd_mac.dmg" -o "$EXMAN_DMG"; then
+            MOUNT_POINT="$TMPDIR_CEP/ExManCmdMount"
+            if hdiutil attach "$EXMAN_DMG" -mountpoint "$MOUNT_POINT" -nobrowse -quiet; then
+                "$MOUNT_POINT/Contents/MacOS/ExManCmd" --install "$ZXP_PATH" \
+                    && echo "  Pymiere Link ✓" || echo "  ⚠️  Pymiere Link install reported an error"
+                hdiutil detach "$MOUNT_POINT" -quiet || true
+            fi
+        fi
+        rm -rf "$TMPDIR_CEP"
+        for CSXS_VER in 6 7 8 9 10 11 12; do
+            defaults write "com.adobe.CSXS.${CSXS_VER}" PlayerDebugMode 1 2>/dev/null || true
+        done
+    else
+        echo "  ⚠️  Could not download pymiere_link.zxp — skipping"
+    fi
+else
+    echo "  Premiere Pro not found — skipping Pymiere Link"
+fi
 
 # ── Download app files ───────────────────────────────────────────────────────
 echo "→ Downloading Finishing Tool..."

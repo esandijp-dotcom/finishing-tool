@@ -98,9 +98,6 @@ def is_clip_orange(clip):
 def is_clip_apricot(clip):
     return clip.GetClipColor() == "Apricot"
 
-def is_clip_chocolate(clip):
-    return clip.GetClipColor() == "Chocolate"
-
 def is_clip_enabled(clip):
     return clip.GetProperty("Enabled") != "0"
 
@@ -259,16 +256,6 @@ def get_offline_reference_path(project, show_code=""):
 
     except Exception:
         return None
-
-def frame_to_timecode(frame, frame_rate):
-    fps = round(float(frame_rate))
-    frames = int(frame)
-    ff = frames % fps
-    total_seconds = frames // fps
-    ss = total_seconds % 60
-    mm = (total_seconds // 60) % 60
-    hh = total_seconds // 3600
-    return f"{hh:02d}:{mm:02d}:{ss:02d}:{ff:02d}"
 
 def frames_to_davinci_tc(frame_number, frame_rate, timeline_start_frame, start_timecode_str):
     parts = start_timecode_str.split(":")
@@ -566,144 +553,57 @@ def get_export_list(plates):
 
 RENDER_PRESET = "02_COLORED VFX 4444 XQ"
 
-def render_clip_now(project, timeline, clip, track_index, render_preset,
-                    output_path, filename, mark_in, mark_out, log_callback=None):
-    track_count = timeline.GetTrackCount("video")
+def find_output_folder(show_code, show_acronym=None, log_callback=None):
+    """
+    Auto-detect output folder: any mounted volume whose name CONTAINS the
+    show code, searched (up to a bounded depth) for the first folder
+    anywhere inside it with "TO VFX" in its name. Deliberately permissive
+    by request — the show code appearing in the volume name is the only
+    requirement now. Earlier versions also required an exact
+    SHOWCODE_*_EDIT -> *TURNOVER* -> *TO VFX* folder chain, which
+    silently failed to match any structure that didn't follow it exactly
+    — including a volume prefixed with "V-"/"I-" before the show code,
+    the specific bug this was originally built to fix, and any other
+    naming/organization variant a given show happens to use.
+    show_acronym is accepted but unused — kept for call-site compatibility.
+    log_callback, if given, is called with a line for what was searched
+    and what matched, so a failed auto-detect is debuggable instead of
+    just "not found".
+    """
+    import glob, os
 
-    # Disable all tracks except the target track
-    # First enable the target track in case it was disabled
-    timeline.SetTrackEnable("video", track_index, True)
-    
-    disabled_tracks = []
-    for t in range(1, track_count + 1):
-        if t != track_index:
-            timeline.SetTrackEnable("video", t, False)
-            disabled_tracks.append(t)
-
-    # Wait for DaVinci to process track changes
-    time.sleep(0.5)
-    
-    # Verify
-    active = [t for t in range(1, track_count + 1) if timeline.GetIsTrackEnabled("video", t)]
-    if log_callback:
-        log_callback(f"    Track state set: only track {track_index} should be active, got {active}")
-
-    project.LoadRenderPreset(render_preset)
-    project.SetRenderSettings({
-        "SelectAllFrames": False,
-        "MarkIn": mark_in,
-        "MarkOut": mark_out,
-        "TargetDir": output_path,
-        "CustomName": filename,
-        "UniqueFilenameStyle": 0,
-        "ExportVideo": True,
-        "ExportAudio": False,
-    })
-
-    clear_render_queue(project)
-    job_id = project.AddRenderJob()
-
-    if not job_id:
+    def _log(msg):
         if log_callback:
-            log_callback(f"    Failed to add render job for {filename}")
-        for t in disabled_tracks:
-            timeline.SetTrackEnable("video", t, True)
-        return False
-
-    if log_callback:
-        jobs = project.GetRenderJobList()
-        for job in jobs:
-            if job.get("JobId") == job_id:
-                log_callback(f"    MarkIn={job.get('MarkIn')}, MarkOut={job.get('MarkOut')}, Track={track_index}")
-
-    # Verify track state before rendering
-    if log_callback:
-        active = [t for t in range(1, track_count + 1) if timeline.GetIsTrackEnabled("video", t)]
-        log_callback(f"    Active tracks before render: {active}")
-
-    project.StartRendering(job_id)
-
-    timeout = 600
-    elapsed = 0
-    while elapsed < timeout:
-        time.sleep(1)
-        elapsed += 1
-        status = project.GetRenderJobStatus(job_id)
-        job_status = status.get("JobStatus", "")
-        if job_status == "Complete":
-            break
-        elif job_status == "Failed":
-            if log_callback:
-                log_callback(f"    Render failed: {status}")
-            for t in disabled_tracks:
-                timeline.SetTrackEnable("video", t, True)
-            clear_render_queue(project)
-            return False
-
-    for t in disabled_tracks:
-        timeline.SetTrackEnable("video", t, True)
-
-    time.sleep(0.2)
-    clear_render_queue(project)
-    return True
-
-def find_output_folder(show_code, show_acronym):
-    """
-    Auto-detect output folder by searching mounted volumes for SHOWCODE.
-    Structure: /Volumes/SHOWCODE_*/SHOWCODE_*_EDIT/<folder with TURNOVER>/<folder with TO VFX>
-    """
-    import glob
+            log_callback(msg)
 
     if not show_code:
+        _log("Output folder auto-detect: no show code set yet, skipping.")
         return None
 
-    # Search /Volumes for drives starting with show_code
-    volumes = glob.glob(f"/Volumes/{show_code}_*")
+    volumes = [v for v in glob.glob("/Volumes/*") if show_code in os.path.basename(v)]
+    _log(f"Output folder auto-detect: show code \"{show_code}\" -> "
+         f"{len(volumes)} volume(s) matched" + (f" ({', '.join(sorted(volumes))})" if volumes else ""))
     if not volumes:
         return None
 
+    MAX_DEPTH = 6
     for volume in sorted(volumes):
-        # Look for SHOWCODE_*_EDIT folder inside
-        edit_folders = glob.glob(f"{volume}/{show_code}_*_EDIT")
-        if not edit_folders:
-            edit_folders = glob.glob(f"{volume}/{show_code}_{show_acronym}_EDIT")
-        if not edit_folders:
-            continue
-        for edit_folder in sorted(edit_folders):
-            # Find folder with TURNOVER in name
-            try:
-                turnover_folders = [
-                    os.path.join(edit_folder, d)
-                    for d in os.listdir(edit_folder)
-                    if "TURNOVER" in d.upper() and
-                    os.path.isdir(os.path.join(edit_folder, d))
-                ]
-            except Exception:
+        base_depth = volume.rstrip(os.sep).count(os.sep)
+        found = False
+        for root, dirs, _files in os.walk(volume):
+            depth = root.rstrip(os.sep).count(os.sep) - base_depth
+            if depth >= MAX_DEPTH:
+                dirs[:] = []
                 continue
-            for turnover_folder in sorted(turnover_folders):
-                # Find folder with TO VFX in name inside turnover folder
-                try:
-                    to_vfx_folders = [
-                        os.path.join(turnover_folder, d)
-                        for d in os.listdir(turnover_folder)
-                        if "TO VFX" in d.upper() and
-                        os.path.isdir(os.path.join(turnover_folder, d))
-                    ]
-                except Exception:
-                    continue
-                for to_vfx in sorted(to_vfx_folders):
-                    return to_vfx
+            for d in dirs:
+                if "TO VFX" in d.upper():
+                    found = True
+                    return os.path.join(root, d)
+        if not found:
+            _log(f"  {volume}: no folder with \"TO VFX\" in its name found "
+                 f"(searched up to {MAX_DEPTH} levels deep).")
 
     return None
-
-
-def episode_sort_key(ep_code):
-    """Sort EP01 < EP01A < EP01B < EP02 < EP45A etc."""
-    import re
-    m = re.match('EP([0-9]+)([A-Z]?)', ep_code.upper())
-    if m:
-        return (int(m.group(1)), m.group(2))
-    return (9999, "")
 
 
 def generate_plate_list_xlsx(export_list, output_dir, show_code, acronym, date_str,
@@ -841,35 +741,6 @@ def generate_plate_list_xlsx(export_list, output_dir, show_code, acronym, date_s
         log_callback(f"✓ Plate list saved: {filename}")
 
     return out_path
-
-
-def find_last_exported(output_dir, export_list):
-    """
-    Scan output folder to find which clips are already exported.
-    Returns the index in export_list to resume from.
-    """
-    import glob
-    exported = set()
-    for mov in glob.glob(os.path.join(output_dir, "EP*", "*.mov")):
-        exported.add(os.path.basename(mov).replace(".mov", ""))
-
-    if not exported:
-        return 0
-
-    # Find the last consecutive index that was exported
-    # (not just the last one found, but the last one in sequence)
-    last_done = -1
-    for i, item in enumerate(export_list):
-        if item["filename"] in exported:
-            last_done = i
-        else:
-            # First gap found - resume from here
-            if last_done >= 0:
-                return last_done + 1
-
-    # All found or none found
-
-    return last_done + 1  # resume from next clip
 
 
 def render_single_clip(project, timeline, render_preset,
@@ -1218,7 +1089,12 @@ class ExportEngine:
 # UI
 # ═══════════════════════════════════════════════════════════════════════════════
 
-APP_WIDTH    = 1500  # fixed window width used by every resize call across both tabs
+# Fixed window width used by every resize call across both tabs. Sized so
+# the Export Queue reliably fits 17 chips per row even in the worst case:
+# 16 regular "EPxx" chips plus the wider TRAILER chip sharing the same row,
+# WITH the scrollbar visible (which itself eats into the row's available
+# width) — verified live via a scratch measurement script, not guessed.
+APP_WIDTH    = 1501
 BG_DARK      = "#1E1E1E"
 BG_OUTER     = "#161616"  # slightly darker for outer app background
 BG_PANEL     = "#2A2A2A"
@@ -1496,8 +1372,8 @@ class VFXExporterApp(tk.Tk):
         self._pp_tails_tc        = None     # tails clip start, in ticks (int) — scratch, for whichever reel is mid-scan
         self._pp_nesting_active = False     # True only while a nest run is actually in flight (running or paused)
         self._pp_exporting_active = False   # True only while _pp_export_task's background thread is actually running — see _pp_clear_all_exp
-        self._pp_hide_before_start_warning = False
-        self._pp_hide_overwrite_prompt = False  # "Don't show again" from _pp_overwrite_dialog — always overwrite from then on
+        self._pp_hide_overwrite_prompt = False  # "Yes to All"/"No to All" (this nesting task only) — reuse _pp_overwrite_remembered_answer from then on, see _pp_overwrite_dialog
+        self._pp_overwrite_remembered_answer = True  # last Yes/No choice made alongside "Don't show again" — see _pp_overwrite_dialog
         self._pp_reels           = []       # one dict per distinct connected timeline this session — see _pp_arm_timeline
         self._pp_current_reel    = None     # index into self._pp_reels
         self._pp_show_info_locked = False   # Show Code/Acronym/Date lock in after the first timeline
@@ -1519,7 +1395,11 @@ class VFXExporterApp(tk.Tk):
         self._pp_exp_run_complete = False   # True once a queue run finishes without being paused — locks DISABLE ALL/ENABLE ALL/CLEAR ALL until a fresh scan/nest
         self._pp_ame_connected   = False    # True once Connect to AME has succeeded this session
         self._pp_skip_nest_mode  = False    # True once Skip Nest is clicked — changes what Connect to AME does
-        self._pp_prescan_active  = False    # True while _pp_prescan_all_reels_task is running (blocks manual track re-picks — see _pp_on_track_selected)
+        self._pp_prescan_active  = False    # True while _pp_prescan_all_reels_task is running (blocks manual track re-picks — see _pp_on_manual_track_picked)
+        self._pp_prescan_abort   = False    # Reset Nest's way to interrupt a still-running prescan without disconnecting (see _pp_reset_nest) — cleared at the start of each fresh prescan
+        self._pp_scan_cancel     = False    # STOP's per-task abort for a single reel scan (arm_timeline/track re-pick/prescan) — see _pp_scan_tracks/_pp_rescan_current_reel. Cleared at the start of each fresh scan
+        self._pp_connect_cancel  = False    # STOP's per-task abort for Connect to Premiere — see _pp_connect_task
+        self._pp_ame_scan_cancel = False    # STOP's per-task abort for Connect to AME/Rescan Episodes — see _pp_skip_nest_scan_task
         self._pp_trailer_seq_name = None    # export-queue name of the TRAILER entry found by Skip Nest, if any — gates SOCIAL MEDIA and routes trailer exports
         # Background SRT watcher state — deliberately NOT reset by RESET
         # ALL, since it tracks files that may still be rendering in AME
@@ -1572,39 +1452,31 @@ class VFXExporterApp(tk.Tk):
         self._pp_track_radios = self._mode_row(self._pp_track_panel, self._pp_track_mode,
                                                 self._pp_on_track_mode_change)
 
-        # Auto/Manual value display sits in one stable wrapper, packed once and
-        # never re-packed — only the two frames INSIDE it toggle visibility.
-        # (Toggling pack()/pack_forget() directly on siblings of tails_label
-        # re-inserts whichever one is shown at the END of the packing order
-        # each time, which is what made tails_label's position swap around.)
-        self._pp_track_value_wrap = tk.Frame(self._pp_track_panel, bg=BG_PANEL)
-        self._pp_track_value_wrap.pack(anchor="w", pady=(6, 0))
+        # Auto mode: one box PER REEL, same layout as Manual mode below
+        # (identical widget structure/dimensions on purpose — switching
+        # modes used to visibly change the section's height because the
+        # old single-box Auto layout wasn't shaped the same as Manual's
+        # row of boxes), each showing that reel's auto-detected track as
+        # a readonly (non-clickable) dropdown instead of a picker. Boxes
+        # appear one by one as each reel's background scan actually
+        # finishes (see _pp_refresh_auto_track_box), not all at once.
+        self._pp_track_auto_row = tk.Frame(self._pp_track_panel, bg=BG_PANEL)
+        self._pp_track_auto_row.pack(anchor="w", pady=(6, 0))  # "auto" is the default mode
+        self._pp_track_auto_boxes = {}  # reel label -> box dict
+        self._pp_build_auto_track_boxes()
 
-        # Auto: same box style as Manual's dropdown, but read-only and yellow —
-        # no visual difference in design when the mode is toggled.
-        self._pp_track_auto_frame = tk.Frame(self._pp_track_value_wrap, bg=BG_PANEL)
-        self._pp_track_auto_frame.pack(anchor="w")
-        self._pp_track_auto_var = tk.StringVar()
-        self._pp_track_auto_display = self._canvas_dropdown(
-            self._pp_track_auto_frame, self._pp_track_auto_var,
-            placeholder="Not detected yet", readonly=True, text_color=ACCENT)
-        self._pp_track_auto_display.pack(anchor="w")
-
-        # Manual: custom canvas-drawn dropdown (hidden by default) — a stock
-        # tk.OptionMenu's popup ignores our dark theme colors on macOS.
-        self._pp_track_manual_frame = tk.Frame(self._pp_track_value_wrap, bg=BG_PANEL)
-        self._pp_track_var = tk.StringVar()
-        self._pp_track_dropdown = self._canvas_dropdown(
-            self._pp_track_manual_frame, self._pp_track_var,
-            placeholder="Select track...", command=self._pp_on_track_selected)
-        self._pp_track_dropdown.pack(anchor="w")
-
-        # Single status line: shows the placeholder hint until a scan result
-        # comes back, then that result (tails found / warning) replaces it
-        # in place rather than stacking as a second line.
-        self._pp_track_hint = tk.Label(self._pp_track_panel, text="Auto-detected on connect",
-                                        font=FONT_SMALL, bg=BG_PANEL, fg=TEXT_MUTED, anchor="w")
-        self._pp_track_hint.pack(anchor="w", pady=(4, 0))
+        # Manual mode: one box PER REEL, side by side, each with its own
+        # track picker — filtered to whichever tracks actually exist and
+        # have a plausible clip count for that reel once its scan lands
+        # (see _pp_refresh_manual_track_box), falling back to the full
+        # "V1".."V20" list until then / if nothing plausible was found.
+        # Built as soon as every reel's name is known (right after
+        # Connect to Premiere — see _pp_build_manual_track_boxes), not tied
+        # to a reel having actually been scanned/armed yet; picking a track
+        # here is what triggers registering that reel (see
+        # _pp_on_manual_track_picked).
+        self._pp_track_manual_row = tk.Frame(self._pp_track_panel, bg=BG_PANEL)
+        self._pp_track_manual_boxes = {}  # reel label -> box dict
 
         # ── OUTPUT FOLDER ────────────────────────────────────────────────────
         self._section_label(main, "OUTPUT FOLDER")
@@ -1629,25 +1501,34 @@ class VFXExporterApp(tk.Tk):
         # _pp_start_srt_watcher. Auto-detected alongside LIVE/MARKETING.
         self._pp_srt_out_dir = tk.StringVar()
 
-        self._pp_out_browse_row, self._pp_out_entry, self._pp_out_browse_btn = \
-            self._pp_build_out_folder_row(self._pp_out_panel, "LIVE", self._pp_out_dir)
+        # Fixed 2x2 grid, always fully visible in both Auto and Manual
+        # mode — row 0: LIVE, SRT. Row 1: MARKETING (below LIVE), TRAILER
+        # (below SRT). Relevance/mode is expressed as enabled vs. disabled
+        # (greyed) per box, not by hiding/showing or reflowing them — see
+        # _pp_refresh_out_folder_enabled, which is the single place that
+        # decides each box's enabled state. uniform="outcol" forces both
+        # columns to the same width even when e.g. MARKETING and TRAILER's
+        # natural label widths differ.
+        self._pp_out_grid = tk.Frame(self._pp_out_panel, bg=BG_PANEL)
+        self._pp_out_grid.pack(fill="x")
+        self._pp_out_grid.columnconfigure(0, weight=1, uniform="outcol")
+        self._pp_out_grid.columnconfigure(1, weight=1, uniform="outcol")
 
+        self._pp_out_browse_row, self._pp_out_entry, self._pp_out_browse_btn = \
+            self._pp_build_out_folder_cell(self._pp_out_grid, "LIVE", self._pp_out_dir, 0, 0)
+        self._pp_srt_out_row, self._pp_srt_out_entry, self._pp_srt_out_browse_btn = \
+            self._pp_build_out_folder_cell(self._pp_out_grid, "SRT", self._pp_srt_out_dir, 0, 1)
+        self._pp_marketing_out_row, self._pp_marketing_out_entry, self._pp_marketing_out_browse_btn = \
+            self._pp_build_out_folder_cell(self._pp_out_grid, "MARKETING", self._pp_marketing_out_dir, 1, 0)
+        self._pp_trailer_out_row, self._pp_trailer_out_entry, self._pp_trailer_out_browse_btn = \
+            self._pp_build_out_folder_cell(self._pp_out_grid, "TRAILER", self._pp_trailer_out_dir, 1, 1)
+        self._pp_refresh_out_folder_enabled()
+
+        # Always below the whole grid, regardless of which/how many of the
+        # four boxes are currently showing.
         self._pp_out_hint = tk.Label(self._pp_out_panel, text="Auto-detected after nesting",
                                       font=FONT_SMALL, bg=BG_PANEL, fg=TEXT_MUTED, anchor="w")
         self._pp_out_hint.pack(anchor="w", pady=(4, 0))
-
-        # Manual-only — MARKETING/TRAILER/SRT folders aren't auto-detected
-        # the user doesn't need to see them at all in Auto mode, and even
-        # in Manual mode they only appear once actually relevant.
-        self._pp_marketing_out_row, self._pp_marketing_out_entry, self._pp_marketing_out_browse_btn = \
-            self._pp_build_out_folder_row(self._pp_out_panel, "MARKETING", self._pp_marketing_out_dir)
-        self._pp_trailer_out_row, self._pp_trailer_out_entry, self._pp_trailer_out_browse_btn = \
-            self._pp_build_out_folder_row(self._pp_out_panel, "TRAILER", self._pp_trailer_out_dir)
-        self._pp_srt_out_row, self._pp_srt_out_entry, self._pp_srt_out_browse_btn = \
-            self._pp_build_out_folder_row(self._pp_out_panel, "SRT", self._pp_srt_out_dir)
-        self._pp_marketing_out_row.pack_forget()
-        self._pp_trailer_out_row.pack_forget()
-        self._pp_srt_out_row.pack_forget()
 
         # ── PHASE 1 — NEST EPISODES ────────────────────────────────────────
         self._section_label(main, "PHASE 1 — NEST EPISODES")
@@ -1735,19 +1616,27 @@ class VFXExporterApp(tk.Tk):
 
         # EPISODES NESTED chip box (like ep_outer in VFX tab)
         self._section_label(main, "EPISODES NESTED")
-        # pady=12 matches VFX's ep_outer (DETECTED EPISODES) box exactly —
-        # confirmed empty-state reqheight of 25px on both, versus 17px this
-        # used to be at pady=8.
-        self._pp_nest_ep_outer = tk.Frame(main, bg="#252525", padx=12, pady=12)
+        # Horizontal inset (padx=12) stays on the outer frame itself — a
+        # Frame's own padx/pady constructor options only take a single
+        # scalar (applied to both sides), not a tuple, so the asymmetric
+        # top/bottom inset below is done via the inner frame's pack() call
+        # instead, which does support a (top, bottom) tuple.
+        self._pp_nest_ep_outer = tk.Frame(main, bg="#252525", padx=12)
         # bottom=20 (was 8) — extra separation from PHASE 2's header below,
         # which otherwise sat close enough to read as part of this box.
         self._pp_nest_ep_outer.pack(fill="x", pady=(0, 20))
         self._pp_nest_chips_frame = tk.Frame(self._pp_nest_ep_outer, bg="#252525")
-        self._pp_nest_chips_frame.pack(fill="x")
+        # Bottom stays 12 (matches VFX's ep_outer box). Top trimmed to 3 —
+        # the "REEL N" header label packed inside this frame (see
+        # _pp_build_reel_chips/_pp_refresh_chip_visibility) has its own
+        # pady=(2, 2) on top of this, so this alone isn't the full gap
+        # above "REEL 1" — both needed trimming together to actually be
+        # noticeable.
+        self._pp_nest_chips_frame.pack(fill="x", pady=(3, 12))
         tk.Frame(self._pp_nest_chips_frame, bg="#252525", width=0, height=0).pack()
 
-        # ── PHASE 2 — EXPORT LIVE ──────────────────────────────────────────
-        self._section_label(main, "PHASE 2 — EXPORT LIVE")
+        # ── PHASE 2 — EXPORT ──────────────────────────────────────────────
+        self._section_label(main, "PHASE 2 — EXPORT")
         p2_row = tk.Frame(main, bg=BG_DARK)
         p2_row.pack(fill="x", pady=(0, 12), padx=(4, 0))
         self._pp_circ_p2_1 = self._step_circle(p2_row, "1", enabled=False)
@@ -1766,7 +1655,7 @@ class VFXExporterApp(tk.Tk):
         self.btn_pp_stop_exp = self._rounded_btn(p2_row, "■ Stop",
                                                   self._pp_stop_export_now, enabled=False)
         # Don't pack — Stop replaces Export button when running
-        self.btn_pp_reset_exp = self._rounded_btn(p2_row, "Reset Export",
+        self.btn_pp_reset_exp = self._rounded_btn(p2_row, "Reset Queue",
                                                    self._pp_reset_export, enabled=False)
         self.btn_pp_reset_exp.pack(side="left")
 
@@ -1825,7 +1714,7 @@ class VFXExporterApp(tk.Tk):
         self._pp_exp_progress.pack(fill="x", pady=(16, 2))
         _exp_style = ttk.Style()
         _exp_style.configure("PPExp.Horizontal.TProgressbar",
-                              troughcolor=BG_INPUT, background="#5aacf0",
+                              troughcolor=BG_INPUT, background=self.EXP_PROGRESS_DEFAULT,
                               borderwidth=0, thickness=10)
 
         self._pp_exp_status = tk.Label(main, text="",
@@ -1866,9 +1755,43 @@ class VFXExporterApp(tk.Tk):
         # see the matching comment on _pp_nest_ep_outer above.
         self._pp_exp_ep_outer = tk.Frame(main, bg="#252525", padx=12, pady=12)
         self._pp_exp_ep_outer.pack(fill="x", pady=(0, 8))
-        self._pp_exp_chips_frame = tk.Frame(self._pp_exp_ep_outer, bg="#252525")
-        self._pp_exp_chips_frame.pack(fill="x")
+        # Chips live inside a Canvas (not a plain Frame) so _pp_resize_window
+        # can cap this area's height and let it scroll once the window would
+        # otherwise grow past the bottom of the screen — SHOW LOG and
+        # everything below it stays visible instead of getting pushed off.
+        # The scrollbar itself is only packed in when actually needed (see
+        # _pp_resize_window), not shown for a queue that fits naturally.
+        self._pp_exp_scroll_canvas = tk.Canvas(self._pp_exp_ep_outer, bg="#252525",
+                                                highlightthickness=0)
+        self._pp_exp_scrollbar = tk.Scrollbar(self._pp_exp_ep_outer, orient="vertical",
+                                               command=self._pp_exp_scroll_canvas.yview)
+        self._pp_exp_scroll_canvas.configure(yscrollcommand=self._pp_exp_scrollbar.set)
+        self._pp_exp_scroll_canvas.pack(side="left", fill="both", expand=True)
+        self._pp_exp_chips_frame = tk.Frame(self._pp_exp_scroll_canvas, bg="#252525")
+        self._pp_exp_chips_window = self._pp_exp_scroll_canvas.create_window(
+            (0, 0), window=self._pp_exp_chips_frame, anchor="nw")
         tk.Frame(self._pp_exp_chips_frame, bg="#252525", width=0, height=0).pack()
+
+        def _pp_exp_chips_configure(event):
+            self._pp_exp_scroll_canvas.configure(scrollregion=self._pp_exp_scroll_canvas.bbox("all"))
+        self._pp_exp_chips_frame.bind("<Configure>", _pp_exp_chips_configure)
+
+        def _pp_exp_canvas_configure(event):
+            # Keep the inner frame's width matching the canvas's actual
+            # rendered width (which shrinks once the scrollbar is packed
+            # in) — _pp_build_exp_chips wraps chips into rows based on
+            # self._pp_exp_chips_frame.winfo_width(), same as before.
+            self._pp_exp_scroll_canvas.itemconfig(self._pp_exp_chips_window, width=event.width)
+        self._pp_exp_scroll_canvas.bind("<Configure>", _pp_exp_canvas_configure)
+
+        def _pp_exp_mousewheel(event):
+            self._pp_exp_scroll_canvas.yview_scroll(int(-1 * (event.delta)), "units")
+        def _pp_exp_bind_wheel(_):
+            self.bind_all("<MouseWheel>", _pp_exp_mousewheel)
+        def _pp_exp_unbind_wheel(_):
+            self.unbind_all("<MouseWheel>")
+        self._pp_exp_ep_outer.bind("<Enter>", _pp_exp_bind_wheel)
+        self._pp_exp_ep_outer.bind("<Leave>", _pp_exp_unbind_wheel)
 
         # ── LOG (hidden by default) — same as VFX tab ─────────────────────
         pp_log_header = tk.Frame(main, bg=BG_DARK)
@@ -1914,24 +1837,109 @@ class VFXExporterApp(tk.Tk):
         self._pp_resize_window()
 
     def _pp_resize_window(self):
-        """Resize window to fit content. Window is locked resizable(False, False),
-        which blocks geometry() from growing it on macOS unless briefly unlocked."""
+        """Resize window to fit content, capping total height at the
+        screen's available height once it would otherwise grow past the
+        bottom of the screen. Export Queue's chip area absorbs the
+        overflow — it gets a fixed, scrollable height instead of growing
+        indefinitely — so SHOW LOG and everything below Export Queue stays
+        visible on screen instead of getting pushed off. A queue that
+        fits naturally gets no scrollbar at all. Window is locked
+        resizable(False, False), which blocks geometry() from growing it
+        on macOS unless briefly unlocked."""
         self.update_idletasks()
         self.resizable(False, True)
-        self.geometry(f"{APP_WIDTH}x{self.winfo_reqheight()}")
-        self.resizable(False, False)
 
-    def _pp_alert_dialog(self, title, message, show_illustration=False):
-        """Themed OK/Cancel modal with a "Don't show this again" option — for
-        a heads-up that needs acknowledgment, with an easy way out if the user
-        realizes they need to go do something first. Blocks until answered.
-        Returns True if OK was clicked, False for Cancel or the window close box.
-        show_illustration=True lays the message out next to the same track-
-        targeting animation used in the Setup Guide, for a reminder that
-        benefits from a visual, not just text (currently only "Before You
-        Start")."""
+        # Always remeasure from the same clean baseline — scrollbar
+        # unpacked, canvas at the chip area's own natural height — so
+        # non_chip_height below isn't distorted by whatever the scrollbar
+        # happened to be doing on the previous call (it takes width away
+        # from the canvas once packed, which would otherwise throw off a
+        # measurement taken after packing it).
+        if self._pp_exp_scrollbar.winfo_ismapped():
+            self._pp_exp_scrollbar.pack_forget()
+        chips_natural = self._pp_exp_chips_frame.winfo_reqheight()
+        self._pp_exp_scroll_canvas.configure(height=chips_natural)
+        self.update_idletasks()
+
+        full_height = self.winfo_reqheight()
+        non_chip_height = full_height - chips_natural
+        # 170, not a tighter value — menu bar/title bar/Dock account for
+        # under half of that; the rest is slack for the platform quirk the
+        # retry below already works around (a large single-call height
+        # jump measures a few dozen px short of its own target the first
+        # time it's actually applied), so the cap still holds even before
+        # that retry lands.
+        max_height = self.winfo_screenheight() - 170
+
+        if full_height > max_height:
+            capped_chip_height = max(60, max_height - non_chip_height)
+            self._pp_exp_scroll_canvas.configure(height=capped_chip_height)
+            self._pp_exp_scrollbar.pack(side="right", fill="y")
+            # A single update_idletasks() doesn't reliably finish
+            # propagating a canvas height change into the actual rendered
+            # layout when there are hundreds of chip widgets in the tree
+            # (confirmed live — the canvas ends up configured to the right
+            # height but rendered far shorter, only catching up on some
+            # later, unrelated idle pass). Loop until it's actually caught
+            # up before computing the final window geometry from it.
+            for _ in range(10):
+                self.update_idletasks()
+                if abs(self._pp_exp_scroll_canvas.winfo_height() - capped_chip_height) <= 1:
+                    break
+            target_height = max_height
+        else:
+            target_height = full_height
+
+        self.update_idletasks()
+        self.geometry(f"{APP_WIDTH}x{target_height}")
+        self.resizable(False, False)
+        self.update_idletasks()
+        # A single resizable(False,True) -> geometry() -> resizable(False,False)
+        # pass doesn't reliably apply a LARGE jump in target height on macOS
+        # (confirmed live — winfo_height() ends up far short of target_height
+        # right after this call, even though winfo_reqheight() already
+        # agrees with target_height) — the same underlying quirk this
+        # function's resizable toggle already works around for growth in
+        # general, just not fully covered for a big jump in one shot.
+        # Retrying the apply step immediately, nested in this same call,
+        # does NOT help (confirmed live) — only a genuinely separate,
+        # later call does, once Tk's event queue has had a chance to fully
+        # drain in between. Schedule one deferred retry rather than
+        # looping in place; the pending-flag guards against ever
+        # scheduling a second one on top of an already-pending retry.
+        if (abs(self.winfo_height() - target_height) > 4
+                and not getattr(self, "_pp_resize_retry_pending", False)):
+            self._pp_resize_retry_pending = True
+
+            def _pp_resize_retry():
+                self._pp_resize_retry_pending = False
+                self._pp_resize_window()
+            self.after(50, _pp_resize_retry)
+
+    def _pp_alert_dialog(self, title, message, show_illustration=False, tip=None):
+        """Themed OK/Cancel modal for a heads-up that needs acknowledgment,
+        with an easy way out (Cancel) if the user realizes they need to go
+        do something first. Blocks until answered. Returns True if OK was
+        clicked, False for Cancel or the window close box.
+
+        show_illustration=True lays the header+message out next to the
+        same (fairly tall — 170x198) track-targeting animation used in the
+        Setup Guide, header and message both sitting level with the top of
+        the animation rather than stacked above the whole row — for a
+        reminder that benefits from a visual, not just text (currently
+        only "Before You Start"). tip, if given, renders as a second,
+        separate paragraph right below message, no divider between them —
+        a practical follow-up ("what happens if I don't select a track")
+        rather than a restatement of the header."""
         result = {"value": False}
         dlg = tk.Toplevel(self)
+        # Withdrawn immediately — a Toplevel is visible the instant it's
+        # created, at whatever position the OS/window manager picks by
+        # default (top-left-ish on macOS), BEFORE the geometry() call
+        # below ever runs. That was the corner-then-center glitch: a
+        # real, briefly-visible frame at the wrong spot, then a jump.
+        # Deiconified only once actually positioned correctly.
+        dlg.withdraw()
         dlg.title(title)
         dlg.configure(bg=BG_DARK)
         dlg.resizable(False, False)
@@ -1939,8 +1947,6 @@ class VFXExporterApp(tk.Tk):
 
         body = tk.Frame(dlg, bg=BG_DARK, padx=24, pady=20)
         body.pack(fill="both", expand=True)
-        tk.Label(body, text=title, font=("SF Pro Display", 16, "bold"),
-                 bg=BG_DARK, fg=ACCENT, anchor="w").pack(anchor="w", pady=(0, 8))
 
         if show_illustration:
             cols = tk.Frame(body, bg=BG_DARK)
@@ -1950,23 +1956,28 @@ class VFXExporterApp(tk.Tk):
             self._pp_build_track_illustration(left)
             right = tk.Frame(cols, bg=BG_DARK)
             right.pack(side="left", anchor="n", fill="x", expand=True)
+            tk.Label(right, text=title, font=("SF Pro Display", 16, "bold"),
+                     bg=BG_DARK, fg=ACCENT, anchor="w").pack(anchor="w", pady=(0, 8))
+            tk.Frame(right, bg=ACCENT, height=1).pack(fill="x", pady=(0, 8))
             tk.Label(right, text=message, font=FONT_LABEL, bg=BG_DARK, fg=TEXT_MUTED,
-                     wraplength=220, justify="left", anchor="w").pack(anchor="w")
+                     wraplength=220, justify="left", anchor="w").pack(anchor="w", pady=(0, 8 if tip else 0))
+            if tip:
+                tk.Label(right, text=tip, font=FONT_SMALL, bg=BG_DARK, fg=TEXT_MUTED,
+                         wraplength=220, justify="left", anchor="w").pack(anchor="w")
         else:
+            tk.Label(body, text=title, font=("SF Pro Display", 16, "bold"),
+                     bg=BG_DARK, fg=ACCENT, anchor="w").pack(anchor="w", pady=(0, 8))
             tk.Label(body, text=message, font=FONT_LABEL, bg=BG_DARK, fg=TEXT_MUTED,
                      wraplength=380, justify="left", anchor="w").pack(anchor="w", pady=(0, 16))
-
-        dont_show_var = tk.BooleanVar(value=False)
-        dont_show_check = self._canvas_checkbox(body, dont_show_var, "Don't show this again")
-        dont_show_check.pack(anchor="w", pady=(0, 16))
+            if tip:
+                tk.Label(body, text=tip, font=FONT_SMALL, bg=BG_DARK, fg=TEXT_MUTED,
+                         wraplength=380, justify="left", anchor="w").pack(anchor="w", pady=(0, 16))
 
         btn_row = tk.Frame(body, bg=BG_DARK)
         btn_row.pack(anchor="e", fill="x")
 
         def _answer(val):
             result["value"] = val
-            if dont_show_var.get():
-                self._pp_hide_before_start_warning = True
             dlg.destroy()
 
         cancel_btn = self._rounded_btn(btn_row, "Cancel", lambda: _answer(False))
@@ -1979,6 +1990,7 @@ class VFXExporterApp(tk.Tk):
         x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_reqwidth()) // 2
         y = self.winfo_rooty() + (self.winfo_height() - dlg.winfo_reqheight()) // 2
         dlg.geometry(f"+{x}+{y}")
+        dlg.deiconify()
         dlg.grab_set()
         dlg.wait_window()
         return result["value"]
@@ -2243,6 +2255,17 @@ class VFXExporterApp(tk.Tk):
         canvas.create_text(size//2, size//2, text=number,
                            font=("SF Pro Display", 11, "bold"), fill=ACCENT)
 
+    def _pp_set_circle_disabled(self, canvas, number):
+        """Reverts an already-drawn (active/done) circle back to its
+        initial grey/unreachable look — the same "#555555" _step_circle
+        draws at construction with enabled=False, which otherwise has no
+        way to be restored once a circle's moved past that state."""
+        canvas.delete("all")
+        size = 24
+        canvas.create_oval(1, 1, size-1, size-1, outline="#555555", width=2, fill="")
+        canvas.create_text(size//2, size//2, text=number,
+                           font=("SF Pro Display", 11, "bold"), fill="#555555")
+
     def _pp_update_nest_bar(self):
         self._pp_nest_progress_var2.set(self._pp_nest_progress_var.get() * 100)
 
@@ -2261,64 +2284,258 @@ class VFXExporterApp(tk.Tk):
         if hasattr(self, "_enable_reset_btn"): self._enable_reset_btn()
         mode = self._pp_track_mode.get()
         if mode == "auto":
-            self._pp_track_manual_frame.pack_forget()
-            self._pp_track_auto_frame.pack(anchor="w")
+            self._pp_track_manual_row.pack_forget()
+            self._pp_track_auto_row.pack(anchor="w", pady=(6, 0))
             self.update_idletasks()
-            self._pp_track_auto_display.refresh()
-            self._pp_track_hint.config(text="Auto-detected on connect")
+            for box in self._pp_track_auto_boxes.values():
+                box["dropdown"].refresh()
         else:
-            self._pp_track_auto_frame.pack_forget()
-            self._pp_track_manual_frame.pack(anchor="w")
+            self._pp_track_auto_row.pack_forget()
+            self._pp_track_manual_row.pack(anchor="w", pady=(6, 0), fill="x")
             self.update_idletasks()
-            self._pp_track_dropdown.refresh()
-            self._pp_track_hint.config(text="Select the track manually from the list")
+            for box in self._pp_track_manual_boxes.values():
+                box["dropdown"].refresh()
         # Resize immediately (not deferred) — same jump/snap fix as
         # _pp_on_show_mode_change.
         self._pp_resize_window()
 
-    def _pp_on_track_selected(self, label):
-        self._pp_track_idx = self._pp_manual_track_map.get(label)
-        if self._pp_seq is None:
+    def _pp_build_manual_track_boxes(self):
+        """(Re)builds Manual mode's per-reel track boxes — one per reel in
+        _pp_stringout_map, side by side, each with its own "REEL N" label,
+        a static "V1".."V20" track picker (no scan needed to populate it —
+        the whole point of Manual mode is picking the track yourself), and
+        a tails-detection line that fills in as soon as that reel's
+        background scan finds it (see _pp_refresh_manual_track_box) —
+        independent of which track is picked here, since title cards and
+        the tail leader clip are usually on different tracks. Called once
+        every reel's name is known (_pp_show_timeline_dropdown) and at
+        reset; before that (pre-connect), falls back to a single inert
+        "REEL 1" placeholder box so this section never sits empty,
+        matching Auto mode's own "Not detected yet" placeholder box."""
+        for w in list(self._pp_track_manual_row.winfo_children()):
+            w.destroy()
+        self._pp_track_manual_boxes = {}
+        options = [f"V{i}" for i in range(1, 21)]
+        labels = list(self._pp_stringout_map.keys()) or ["REEL 1"]
+        for reel_label in labels:
+            outer = tk.Frame(self._pp_track_manual_row, bg=BG_PANEL)
+            outer.pack(side="left", anchor="n", padx=(0, 16), pady=(0, 4))
+            tk.Label(outer, text=reel_label, font=("SF Pro Display", 10, "bold"),
+                     bg=BG_PANEL, fg=TEXT_PRIMARY, anchor="w").pack(anchor="w", pady=(0, 2))
+            var = tk.StringVar()
+            # width=220 (the _canvas_dropdown default) matches Auto mode's
+            # box exactly — was 140, noticeably narrower.
+            dropdown = self._canvas_dropdown(
+                outer, var, placeholder="Select track...",
+                command=lambda choice, rl=reel_label: self._pp_on_manual_track_picked(rl, choice))
+            dropdown.set_options(options)
+            dropdown.pack(anchor="w")
+            hint = tk.Label(outer, text="", font=FONT_SMALL, bg=BG_PANEL, fg=TEXT_MUTED,
+                             anchor="w", wraplength=220, justify="left")
+            hint.pack(anchor="w", pady=(4, 0))
+            self._pp_track_manual_boxes[reel_label] = {
+                "outer": outer, "var": var, "dropdown": dropdown, "hint": hint}
+            # A reel already known this session (armed via Auto mode, a
+            # background prescan, or a previous manual pick) should show
+            # what's already known instead of reverting to blank every
+            # rebuild.
+            pair = self._pp_stringout_map.get(reel_label)
+            if pair is not None:
+                seq = pair[1]
+                existing = next((r for r in self._pp_reels if r["seq_id"] == seq._pymiere_id), None)
+                if existing is not None:
+                    self._pp_refresh_manual_track_box(reel_label, existing)
+
+    def _pp_refresh_manual_track_box(self, reel_label, reel):
+        """Syncs one Manual-mode box to a reel's current known state —
+        the picked/detected track (if any), the PICKABLE OPTIONS (once
+        the full scan lands, narrowed to just the tracks that actually
+        exist in this reel with a plausible clip count — see
+        _pp_scan_tracks's manual_options — instead of the full V1-V20
+        placeholder list), and, independently, the tails line, which
+        always reflects whatever the full background scan
+        (_pp_scan_tracks) found for THIS reel regardless of which track
+        is selected here. Called both when a box is first built and every
+        time _pp_rescan_current_reel's _apply() updates or creates a reel
+        (silent background prescans included), so Manual mode's boxes
+        stay live instead of only reflecting a one-time snapshot taken
+        before any scanning had actually finished."""
+        box = self._pp_track_manual_boxes.get(reel_label)
+        if box is None or reel is None:
             return
-        cur = self._pp_reels[self._pp_current_reel] if self._pp_current_reel is not None else None
-        # Track choice only matters before this reel has actually started
-        # nesting — once any episode is real, the track that produced it is
-        # locked in, so a stray Manual-mode click can't corrupt it.
-        if cur is not None and cur["seq_id"] == self._pp_seq._pymiere_id and any(cur["done"]):
+        display = reel.get("track_display") or {}
+        manual_options = display.get("manual_options")
+        if manual_options:
+            box["dropdown"].set_options([f"V{t + 1}" for t in manual_options])
+        if reel.get("track_idx") is not None:
+            box["var"].set(f"V{reel['track_idx'] + 1}")
+        box["hint"].config(text=display.get("tails_text", ""), fg=display.get("tails_fg", TEXT_MUTED))
+
+    def _pp_build_auto_track_boxes(self):
+        """(Re)builds Auto mode's per-reel boxes — same layout/dimensions
+        as _pp_build_manual_track_boxes (see its docstring for why), but
+        each box's dropdown is readonly (no picking) and shows whatever
+        track that reel's background scan auto-detected. Boxes appear as
+        soon as each reel's own scan lands, via _pp_refresh_auto_track_box
+        — not tied to which reel is "current" in the Phase 1 dropdown,
+        unlike the old single-box version this replaced."""
+        for w in list(self._pp_track_auto_row.winfo_children()):
+            w.destroy()
+        self._pp_track_auto_boxes = {}
+        labels = list(self._pp_stringout_map.keys()) or ["REEL 1"]
+        for reel_label in labels:
+            outer = tk.Frame(self._pp_track_auto_row, bg=BG_PANEL)
+            outer.pack(side="left", anchor="n", padx=(0, 16), pady=(0, 4))
+            tk.Label(outer, text=reel_label, font=("SF Pro Display", 10, "bold"),
+                     bg=BG_PANEL, fg=TEXT_PRIMARY, anchor="w").pack(anchor="w", pady=(0, 2))
+            var = tk.StringVar()
+            dropdown = self._canvas_dropdown(
+                outer, var, placeholder="Not detected yet", readonly=True, text_color=ACCENT)
+            dropdown.pack(anchor="w")
+            hint = tk.Label(outer, text="Auto-detected on connect", font=FONT_SMALL, bg=BG_PANEL,
+                             fg=TEXT_MUTED, anchor="w", wraplength=220, justify="left")
+            hint.pack(anchor="w", pady=(4, 0))
+            self._pp_track_auto_boxes[reel_label] = {
+                "outer": outer, "var": var, "dropdown": dropdown, "hint": hint}
+            pair = self._pp_stringout_map.get(reel_label)
+            if pair is not None:
+                seq = pair[1]
+                existing = next((r for r in self._pp_reels if r["seq_id"] == seq._pymiere_id), None)
+                if existing is not None:
+                    self._pp_refresh_auto_track_box(reel_label, existing)
+
+    def _pp_refresh_auto_track_box(self, reel_label, reel):
+        """Syncs one Auto-mode box's readonly dropdown + tails hint to a
+        reel's current known scan result. Called every time
+        _pp_rescan_current_reel's _apply() updates or creates a reel
+        (silent background prescans included), so a reel's box fills in
+        the moment its own scan actually lands — not only once it
+        happens to become the "current" reel in the Phase 1 dropdown."""
+        box = self._pp_track_auto_boxes.get(reel_label)
+        if box is None or reel is None:
+            return
+        display = reel.get("track_display") or {}
+        box["var"].set(display.get("auto_label", ""))
+        box["dropdown"].refresh()
+        box["hint"].config(text=display.get("tails_text", ""), fg=display.get("tails_fg", TEXT_MUTED))
+
+    def _pp_on_manual_track_picked(self, reel_label, track_choice):
+        """A "V#" pick in one of Manual mode's per-reel boxes — collects
+        that reel's title clips directly on the chosen track (no
+        multi-track discovery pass, unlike Auto mode's scan) and
+        registers/updates the reel exactly the way arming it normally
+        would, by reusing _pp_rescan_current_reel — it already handles
+        both "brand new reel" and "already-known reel, track changed"
+        correctly, so there's no need to duplicate that here.
+
+        Locks the REEL dropdown to "SCANNING" for the duration, same as
+        _pp_arm_timeline — picking a track here can target ANY reel's
+        box, not just whichever one is currently armed/displayed, so it
+        needs the same guard against a second scan starting mid-flight."""
+        pair = self._pp_stringout_map.get(reel_label)
+        if pair is None:
+            return
+        name, seq = pair
+        try:
+            track_idx = int(track_choice[1:]) - 1
+        except (ValueError, IndexError):
+            return
+        existing = next((r for r in self._pp_reels if r["seq_id"] == seq._pymiere_id), None)
+        if existing is not None and any(existing["done"]):
+            # Track choice only matters before this reel has actually
+            # started nesting — once any episode is real, the track that
+            # produced it is locked in.
             return
         if self._pp_prescan_active:
-            # A background pre-load of other reels is still running on its
-            # own thread — don't start a second one touching Premiere
-            # concurrently. The map is already correct for when it lands.
             self._pp_nest_status.config(
                 text="Still loading reels — try again in a moment.", fg=TEXT_WARN)
             return
-        self._start_thinking()
+        box = self._pp_track_manual_boxes.get(reel_label)
+        self._pp_scan_cancel = False
+        prev_display = self._pp_timeline_var.get() if getattr(self, "_pp_timeline_var", None) is not None else ""
+        if getattr(self, "_pp_timeline_var", None) is not None:
+            self._pp_timeline_var.set("SCANNING")
+        self._pp_set_timeline_dropdown_enabled(False)
+
+        def _on_stop():
+            self._pp_scan_cancel = True
+            if getattr(self, "_pp_timeline_var", None) is not None:
+                self._pp_timeline_var.set(prev_display)
+            self._pp_set_timeline_dropdown_enabled(True)
+            if box is not None:
+                box["hint"].config(text="Stopped.", fg=TEXT_WARN)
+
+        self._start_thinking(on_stop=_on_stop)
         import threading
-        threading.Thread(target=lambda: self._pp_rescan_current_reel(self._pp_seq), daemon=True).start()
+        threading.Thread(target=lambda: self._pp_register_manual_track(seq, track_idx, reel_label),
+                          daemon=True).start()
+
+    def _pp_register_manual_track(self, seq, track_idx, reel_label):
+        """Registers the chosen track as this reel's title-card track.
+        Deliberately does NOT (re)detect tails here — title cards and the
+        tail leader clip are usually on different tracks, so tying tails
+        to whichever track was just picked for title cards would be
+        wrong more often than not. Tails stays whatever the reel's own
+        full background scan (_pp_scan_tracks, which sweeps every track
+        independently of title-card selection) already found; this just
+        reuses it. If that scan hasn't reached this reel yet, the hint
+        says so instead of silently showing nothing."""
+        try:
+            existing = next((r for r in self._pp_reels if r["seq_id"] == seq._pymiere_id), None)
+            if existing is not None:
+                tails_tc = existing.get("tails_tc")
+                display = dict(existing.get("track_display") or {})
+            else:
+                tails_tc = None
+                display = {}
+            if "tails_text" not in display:
+                display["tails_text"] = "Still scanning for tail leader clip..."
+                display["tails_fg"] = TEXT_MUTED
+            display.pop("auto_label", None)  # Manual mode's box has no auto-label line
+
+            box = self._pp_track_manual_boxes.get(reel_label)
+            if box is not None:
+                self.after(0, lambda: box["hint"].config(
+                    text=display["tails_text"], fg=display["tails_fg"]))
+
+            self._pp_track_idx = track_idx
+            self._pp_tails_tc = tails_tc
+            self._pp_seq = seq
+            self._pp_rescan_current_reel(seq, silent=False, track_display=display,
+                                          manage_thinking=True, reel_label=reel_label)
+        except Exception as e:
+            if self._pp_scan_cancel:
+                return
+            import traceback
+            traceback.print_exc()
+            self.after(0, self._stop_thinking)
+            self.after(0, lambda: self._pp_set_timeline_dropdown_enabled(True))
+            self._pp_log(f"⚠ Could not register {reel_label}'s V{track_idx + 1 if track_idx is not None else '?'} track: {e}", "warn")
 
     def _pp_on_out_mode_change(self):
         if hasattr(self, "_enable_reset_btn"): self._enable_reset_btn()
         is_auto = self._pp_out_mode.get() == "auto"
         self._set_widgets_enabled([self._pp_out_entry, self._pp_out_browse_btn], not is_auto)
         self._pp_out_hint.config(
-            text="Auto-detected after nesting" if is_auto else "Browse to select your LIVE output folder")
+            text="Auto-detected after nesting" if is_auto else "Browse to select your output folder")
         self._pp_refresh_manual_folder_rows()
         self._pp_resize_window()
 
-    def _pp_build_out_folder_row(self, parent, label_text, var):
-        """One labeled bordered-entry + Browse row — same look as the
-        original LIVE output folder box. Label and entry row are grouped
-        under a single outer frame so a caller can show/hide the whole
-        thing (label included) with one pack/pack_forget call. Returns
-        (outer, entry, browse_btn)."""
+    def _pp_build_out_folder_cell(self, parent, label_text, var, row, col):
+        """One labeled bordered-entry + Browse cell, gridded at a fixed
+        (row, col) — same look as the original LIVE output folder box.
+        Always visible; see _pp_refresh_out_folder_enabled for how its
+        enabled/disabled state gets decided. Label and entry row are
+        grouped under a single outer frame. Returns (outer, entry,
+        browse_btn)."""
         outer = tk.Frame(parent, bg=BG_PANEL)
-        outer.pack(fill="x")
+        outer.grid(row=row, column=col, sticky="ew",
+                    padx=(0, 8) if col == 0 else (8, 0), pady=(0, 8))
         tk.Label(outer, text=label_text, font=("SF Pro Display", 10, "bold"),
                  bg=BG_PANEL, fg=TEXT_PRIMARY, anchor="w").pack(anchor="w", pady=(8, 2))
-        row = tk.Frame(outer, bg=BG_PANEL)
-        row.pack(fill="x", pady=(0, 2))
-        wrap = tk.Frame(row, bg=BG_INPUT, highlightthickness=1,
+        entry_row = tk.Frame(outer, bg=BG_PANEL)
+        entry_row.pack(fill="x", pady=(0, 2))
+        wrap = tk.Frame(entry_row, bg=BG_INPUT, highlightthickness=1,
                          highlightbackground=BORDER, highlightcolor=ACCENT)
         wrap.pack(side="left", fill="x", expand=True)
         tk.Frame(wrap, bg=BG_INPUT, width=2).pack(side="left")
@@ -2327,7 +2544,7 @@ class VFXExporterApp(tk.Tk):
                           bd=0, highlightthickness=0, state="disabled")
         entry.pack(side="left", fill="x", expand=True, ipady=7)
         browse_btn = self._rounded_btn(
-            row, "Browse...",
+            entry_row, "Browse...",
             lambda: self._pp_browse_into(var, f"Select {label_text} Output Folder"),
             small=True, match_height=True, enabled=False)
         browse_btn.pack(side="left", padx=(8, 0), fill="y")
@@ -2357,35 +2574,38 @@ class VFXExporterApp(tk.Tk):
             var.set(path)
 
     def _pp_refresh_manual_folder_rows(self):
-        """MARKETING/TRAILER/SRT browse rows (label included) only ever show
-        in Manual mode, and even then only when actually relevant —
-        MARKETING checked (for episodes), a TRAILER entry currently sits in
-        the export queue, or SRT checked (SRT requires LIVE checked too —
-        see _pp_run_export). In Auto mode these are silently auto-detected
-        alongside LIVE, so no row is needed at all."""
+        self._pp_refresh_out_folder_enabled()
+
+    def _pp_refresh_out_folder_enabled(self):
+        """All four Output Folder boxes (LIVE, SRT, MARKETING, TRAILER)
+        stay gridded at their fixed positions at all times, in both Auto
+        and Manual mode — only their enabled/disabled (greyed) look
+        changes. In Auto mode every box is disabled (they'll all be
+        auto-detected). In Manual mode: LIVE is always enabled; MARKETING/
+        SRT/TRAILER are enabled only once actually relevant (MARKETING
+        checked, SRT checked alongside LIVE, or a TRAILER entry sitting
+        in the export queue) and otherwise stay visible but greyed out,
+        instead of being hidden. Re-run any time relevance changes (mode
+        toggle, a style checkbox, a trailer being found, RESET ALL...)."""
         is_manual = self._pp_out_mode.get() == "manual"
         show_marketing = is_manual and self._pp_style_vars["MARKETING"].get()
-        show_trailer = is_manual and self._pp_trailer_seq_name is not None
         show_srt = is_manual and self._pp_srt_var.get() and self._pp_style_vars["LIVE"].get()
-        if show_marketing:
-            if not self._pp_marketing_out_row.winfo_ismapped():
-                self._pp_marketing_out_row.pack(fill="x")
-            self._set_widgets_enabled([self._pp_marketing_out_entry, self._pp_marketing_out_browse_btn], True)
-        else:
-            self._pp_marketing_out_row.pack_forget()
-        if show_trailer:
-            if not self._pp_trailer_out_row.winfo_ismapped():
-                self._pp_trailer_out_row.pack(fill="x")
-            self._set_widgets_enabled([self._pp_trailer_out_entry, self._pp_trailer_out_browse_btn], True)
-        else:
-            self._pp_trailer_out_row.pack_forget()
-        if show_srt:
-            if not self._pp_srt_out_row.winfo_ismapped():
-                self._pp_srt_out_row.pack(fill="x")
-            self._set_widgets_enabled([self._pp_srt_out_entry, self._pp_srt_out_browse_btn], True)
-        else:
-            self._pp_srt_out_row.pack_forget()
-        self._pp_resize_window()
+        show_trailer = is_manual and self._pp_trailer_seq_name is not None
+
+        for enabled, entry, browse_btn in (
+            (show_marketing, self._pp_marketing_out_entry, self._pp_marketing_out_browse_btn),
+            (show_srt, self._pp_srt_out_entry, self._pp_srt_out_browse_btn),
+            (show_trailer, self._pp_trailer_out_entry, self._pp_trailer_out_browse_btn),
+        ):
+            self._set_widgets_enabled([entry, browse_btn], enabled)
+        # LIVE's own enabled state is governed by Auto/Manual mode itself
+        # (see _pp_on_out_mode_change) — don't stomp on that here.
+
+        # Guarded — this runs once at initial tab construction (placing
+        # LIVE for the first time), before EXPORT QUEUE further down has
+        # built the scrollbar _pp_resize_window depends on.
+        if hasattr(self, "_pp_exp_scrollbar"):
+            self._pp_resize_window()
 
     def _pp_connect(self):
         """Connect to Premiere Pro and list every STRINGOUT timeline in the
@@ -2396,13 +2616,27 @@ class VFXExporterApp(tk.Tk):
         # show activity is happening; a redundant text label just to say
         # the same thing adds noise, not information.
         self._connect_status.config(text="Connecting to Premiere...")
+        self._pp_connect_cancel = False
+
+        def _on_stop():
+            # The actual ExtendScript round trip below is a single call,
+            # not a loop with a checkpoint to interrupt mid-flight — so
+            # STOP reverts everything immediately here instead of waiting
+            # for it to return, and _pp_connect_cancel tells the
+            # background thread (once it eventually does return) to
+            # quietly discard its result instead of applying it or
+            # touching the thinking state again.
+            self._pp_connect_cancel = True
+            self._connect_status.config(text="")
+            self._pp_nest_status.config(text="Stopped.", fg=TEXT_WARN)
+            self._set_btn_state(self.btn_pp_connect, True)
+
+        self._start_thinking(on_stop=_on_stop)
         self.update_idletasks()
         import threading
         threading.Thread(target=self._pp_connect_task, daemon=True).start()
 
     def _pp_connect_task(self):
-        self.after(0, self._start_thinking)
-
         def _status(msg, color=TEXT_MUTED):
             self.after(0, lambda m=msg, c=color: self._pp_nest_status.config(text=m, fg=c))
 
@@ -2410,6 +2644,8 @@ class VFXExporterApp(tk.Tk):
             import pymiere
             from pymiere.core import eval_script as _es
             EXCLUDE_TOKENS = ("XML", "AAF", "REF", "VFX", "SUB", "NESTED", "TRAILER")
+            self._pp_log("Connecting to Premiere Pro...", "muted")
+            _status("Scanning project for STRINGOUT reels...")
 
             # Scope the scan to the DELIVERY > STRINGOUT bin when it exists,
             # so a loose/misplaced STRINGOUT-named sequence elsewhere in the
@@ -2470,11 +2706,19 @@ class VFXExporterApp(tk.Tk):
                 return int(match.group(1)) if match else float("inf")
             stringout.sort(key=lambda pair: _ep_sort_key(pair[0]))
 
+            if self._pp_connect_cancel:
+                # STOP already reverted everything synchronously (see
+                # _pp_connect's on_stop) — the ExtendScript call above
+                # still ran to completion in the background regardless,
+                # but its result is stale now, so just drop it.
+                return
+
             if not stringout:
                 # Zero STRINGOUT timelines left isn't a connection failure —
                 # it's exactly the scenario Skip Nest exists for (everything
                 # already nested in a previous session). Treat this as a
                 # successful connect with nothing to nest, not an error.
+                self._pp_log("Connected. No STRINGOUT timelines found.", "success")
                 self.after(0, self._stop_thinking)
                 self.after(0, lambda: self._connect_status.config(text=""))
                 self._pp_connected = True
@@ -2488,21 +2732,37 @@ class VFXExporterApp(tk.Tk):
                         "if episodes are already nested.", "#50e050")
                 return
 
+            self._pp_log(f"Connected. Found {len(stringout)} STRINGOUT timeline(s): "
+                         f"{', '.join(name for name, _ in stringout)}.", "success")
             self.after(0, lambda: self._pp_show_timeline_dropdown(stringout))
-            # No _stop_thinking() here — _pp_show_timeline_dropdown triggers
-            # _pp_prescan_all_reels, which owns the thinking-dots lifecycle
-            # for the whole "SCANNING" period itself (starts it, stops it in
-            # its own finally block). Stopping it here raced against that
-            # and could cut the animation short right as scanning began.
+            # _pp_connect()'s own _start_thinking() call (before this
+            # background thread even started) still needs ITS OWN
+            # matching _stop_thinking() here — _thinking_depth is a
+            # reentrant counter (see _start_thinking's docstring), so
+            # this decrement doesn't cut anything short: it just cancels
+            # out this call's own increment. _pp_show_timeline_dropdown
+            # triggers _pp_prescan_all_reels right after this, which
+            # does its OWN separate _start_thinking()/_stop_thinking()
+            # pair for the "SCANNING" period — omitting this one used to
+            # permanently leave depth at 1 after every successful
+            # connect, since nothing else was ever going to cancel out
+            # THIS call's own increment (seen live: thinking dots/STOP
+            # never fully clearing again for the rest of the session,
+            # no matter what finished afterward).
+            self.after(0, self._stop_thinking)
             self.after(0, lambda: self._connect_status.config(text=""))
 
         except ImportError:
+            if self._pp_connect_cancel:
+                return
             self.after(0, self._stop_thinking)
             self.after(0, self._restore_reset_btn)
             self.after(0, lambda: self._connect_status.config(text=""))
             self.after(0, lambda: self._set_btn_state(self.btn_pp_connect, True))
             _status("✗ Pymiere not installed. Run: pip install pymiere", TEXT_ERROR)
         except Exception as e:
+            if self._pp_connect_cancel:
+                return
             self.after(0, self._stop_thinking)
             self.after(0, self._restore_reset_btn)
             self.after(0, lambda: self._connect_status.config(text=""))
@@ -2520,6 +2780,8 @@ class VFXExporterApp(tk.Tk):
         status line once a reel is selected."""
         reel_labels = [f"REEL {i + 1}" for i in range(len(stringout_pairs))]
         self._pp_stringout_map = dict(zip(reel_labels, stringout_pairs))
+        self._pp_build_auto_track_boxes()
+        self._pp_build_manual_track_boxes()
 
         if getattr(self, "_pp_timeline_dropdown", None) is None:
             self.btn_pp_connect.destroy()
@@ -2549,8 +2811,10 @@ class VFXExporterApp(tk.Tk):
             self._reset_armed[self._active_tab] = True
         else:
             self._enable_reset_btn()
-        self._pp_mute_check.set_enabled(True)
-        self._pp_nest_all_check.set_enabled(True)
+        # Mute Master Clips/Nest All deliberately NOT enabled here — they'd
+        # be clickable while every reel is still being pre-scanned
+        # (dropdown shows "SCANNING"). _pp_finish_initial_scan enables them
+        # once that background scan actually finishes.
         if not self._pp_skip_nest_mode:
             self._set_btn_state(self.btn_pp_skip_nest, True)
 
@@ -2568,18 +2832,16 @@ class VFXExporterApp(tk.Tk):
             if not self._pp_show_info_locked:
                 self._pp_autofill_from_name(first_name)
                 self._pp_show_info_locked = True
+                self._pp_nest_status.config(text="Detecting output folder...", fg=TEXT_MUTED)
                 self._pp_detect_output()
                 sc = self.pp_show_code.get().strip()
                 ac = self.pp_acronym.get().strip()
                 pill_text = f"{sc}_{ac}" if sc and ac else sc
                 if pill_text:
                     self._update_show_pill(pill_text, tab="test")
-            # Pre-load every reel now (one background task, reels scanned
-            # strictly one at a time — arming only the first) instead of
-            # scanning just this one — otherwise a reel's Starting
-            # Episode # only accounts for whichever reels happened to be
-            # scanned before it, so jumping straight to Reel 3 without
-            # ever visiting Reel 2 would shortchange its numbering.
+            # Scans and displays Reel 1 first, then keeps going through
+            # every other reel in the background — see
+            # _pp_prescan_all_reels.
             self._pp_prescan_all_reels(arm_first=True)
 
     def _pp_on_timeline_selected(self, label):
@@ -2599,6 +2861,7 @@ class VFXExporterApp(tk.Tk):
         if not self._pp_show_info_locked:
             self._pp_autofill_from_name(name)
             self._pp_show_info_locked = True
+            self._pp_nest_status.config(text="Detecting output folder...", fg=TEXT_MUTED)
             self._pp_detect_output()
             sc = self.pp_show_code.get().strip()
             ac = self.pp_acronym.get().strip()
@@ -2614,19 +2877,33 @@ class VFXExporterApp(tk.Tk):
         self._pp_nest_status.config(text=f"Scanning {name}...", fg=TEXT_MUTED)
         self._pp_track_idx = None
         self._pp_tails_tc = None
-        self._start_thinking()
+        self._pp_scan_cancel = False
+        # A STOP click during an EARLIER batch prescan (_pp_prescan_all_reels_task)
+        # leaves this True — _pp_scan_tracks's per-track loop checks it too
+        # (not just _pp_scan_cancel), so without resetting it here, picking
+        # a fresh, not-yet-scanned reel right after that STOP would trip
+        # the abort check on its very first track and bail almost
+        # instantly — before the STOP takeover below even got a chance to
+        # render, let alone actually cancel anything of THIS scan's own.
+        self._pp_prescan_abort = False
+        # Whatever the dropdown showed before this scan started — restored
+        # by STOP if the editor cancels partway through (see below)
+        # instead of falling back to a full RESET ALL.
+        prev_display = self._pp_timeline_var.get() if getattr(self, "_pp_timeline_var", None) is not None else ""
+        if getattr(self, "_pp_timeline_var", None) is not None:
+            self._pp_timeline_var.set("SCANNING")
+        self._pp_set_timeline_dropdown_enabled(False)
+
+        def _on_stop():
+            self._pp_scan_cancel = True
+            if getattr(self, "_pp_timeline_var", None) is not None:
+                self._pp_timeline_var.set(prev_display)
+            self._pp_set_timeline_dropdown_enabled(True)
+            self._pp_nest_status.config(text="Stopped.", fg=TEXT_WARN)
+
+        self._start_thinking(on_stop=_on_stop)
         import threading
         threading.Thread(target=lambda: self._pp_scan_tracks(seq, reel_label=reel_label), daemon=True).start()
-
-    def _pp_restore_track_display(self, display):
-        if not display:
-            return
-        self._pp_track_auto_var.set(display.get("auto_label", ""))
-        self._pp_track_hint.config(text=display.get("tails_text", ""),
-                                    fg=display.get("tails_fg", TEXT_MUTED))
-        self._pp_manual_track_map = dict(display.get("manual_map", {}))
-        self._pp_track_dropdown.set_options(display.get("manual_options", []))
-        self._pp_track_var.set(display.get("manual_selected", ""))
 
     def _pp_refresh_nest_button_enabled(self):
         """Nest Episodes should only ever be clickable once the full
@@ -2678,7 +2955,10 @@ class VFXExporterApp(tk.Tk):
         self._pp_seq = reel["seq"]
         self._pp_refresh_chip_visibility()
         self._pp_track_idx = reel.get("track_idx")
-        self._pp_restore_track_display(reel.get("track_display"))
+        # Auto/Manual mode boxes no longer need a "current reel" sync —
+        # every reel's box already reflects its own scan result live
+        # (see _pp_refresh_auto_track_box/_pp_refresh_manual_track_box),
+        # regardless of which one is armed here.
         # Keep the dropdown's displayed label in sync even when it's locked
         # (Nest All arms reels programmatically, without a direct dropdown click).
         if getattr(self, "_pp_timeline_var", None) is not None:
@@ -2766,22 +3046,42 @@ class VFXExporterApp(tk.Tk):
                 return
 
             def _apply():
-                if self._pp_skip_nest_mode or not self._pp_connected:
-                    # Either Skip Nest was clicked, or RESET ALL ran,
+                if self._pp_skip_nest_mode or not self._pp_connected or self._pp_prescan_abort or self._pp_scan_cancel:
+                    # Skip Nest was clicked, RESET ALL ran, Reset Nest
+                    # interrupted a still-running prescan (without
+                    # disconnecting — see _pp_prescan_abort), or STOP
+                    # cancelled just this one scan (see _pp_scan_cancel),
                     # while this background scan was still in flight —
-                    # EPISODES NESTED was already cleared either way;
-                    # don't let a late-arriving result repopulate it.
+                    # don't let a late-arriving result repopulate anything.
+                    # Unlike the other three reasons, a scan cancel doesn't
+                    # get its own stop_thinking() call anywhere else, so it
+                    # needs one here.
+                    if self._pp_scan_cancel and manage_thinking:
+                        self._stop_thinking()
                     return
-                cur = self._pp_reels[self._pp_current_reel] if self._pp_current_reel is not None else None
-                if cur is not None and cur["seq_id"] == seq._pymiere_id:
+                # Looked up by seq_id across every known reel, NOT just
+                # whichever one happens to be currently armed/displayed —
+                # a Manual-mode track re-pick can target ANY reel's box,
+                # not only self._pp_current_reel's. Comparing against only
+                # the current reel used to silently miss an existing
+                # match, falling into the "new reel" branch below and
+                # appending a DUPLICATE entry for a reel that already
+                # existed (seen live: picking a track for a reel other
+                # than the one showing in the dropdown).
+                existing_idx = next((i for i, r in enumerate(self._pp_reels)
+                                      if r["seq_id"] == seq._pymiere_id), None)
+                cur = self._pp_reels[existing_idx] if existing_idx is not None else None
+                if cur is not None:
                     self._pp_destroy_reel_chips(cur)
                     cur.update(track_idx=track_idx, tails_tc=tails_tc,
                                title_clips=title_clips, total=total, done=[False] * total,
                                resume_idx=0, nest_done=False, setup_done=False,
                                track_display=track_display)
                     self._pp_build_reel_chips(cur)
+                    self._pp_refresh_manual_track_box(cur.get("reel_label"), cur)
+                    self._pp_refresh_auto_track_box(cur.get("reel_label"), cur)
                     if not silent:
-                        self._pp_restore_track_display(track_display)
+                        self._pp_current_reel = existing_idx
                 else:
                     next_ep = max((r["start_ep"] + r["total"] for r in self._pp_reels),
                                   default=int(self.pp_start_ep.get() or 1))
@@ -2806,10 +3106,11 @@ class VFXExporterApp(tk.Tk):
                                 "track_display": track_display}
                     self._pp_reels.append(new_reel)
                     self._pp_build_reel_chips(new_reel)
+                    self._pp_refresh_manual_track_box(this_reel_label, new_reel)
+                    self._pp_refresh_auto_track_box(this_reel_label, new_reel)
                     if not silent:
                         self._pp_current_reel = len(self._pp_reels) - 1
                         self.pp_start_ep.set(str(next_ep))
-                        self._pp_restore_track_display(track_display)
 
                 self._pp_refresh_chip_visibility()
                 if silent:
@@ -2821,8 +3122,28 @@ class VFXExporterApp(tk.Tk):
                 self.btn_pp_run._command = self._pp_run_autonest
                 self._pp_refresh_nest_button_enabled()
                 self._set_btn_state(self.btn_pp_reset_nest, True)
-                self._pp_set_circle_done(self._pp_circ_p1_1)
-                self._pp_set_circle_active(self._pp_circ_p1_2, "2")
+                # Step circle 1 (checkmark), step circle 2 (active), the
+                # dropdown's "SCANNING" placeholder, and its lock all
+                # declare the SAME thing — "Connect to Premiere is truly
+                # finished" — so they're gated together.
+                #
+                # Gated on _pp_prescan_active: an eager batch prescan
+                # (_pp_prescan_all_reels_task) calls this non-silently for
+                # its FIRST reel only, while later reels' title-card tracks
+                # are still being scanned in the background on the same
+                # thread — declaring the step done/restoring the dropdown
+                # here used to show a checkmark (and let a reel get picked)
+                # mid-batch, before every reel (and its track scan) was
+                # actually done. That task's own _finish() (via
+                # _pp_finish_initial_scan) is the sole authority for both
+                # once the whole batch is genuinely finished; skip all of
+                # it here while it's still active.
+                if not self._pp_prescan_active:
+                    self._pp_set_circle_done(self._pp_circ_p1_1)
+                    self._pp_set_circle_active(self._pp_circ_p1_2, "2")
+                    if getattr(self, "_pp_timeline_var", None) is not None and self._pp_current_reel is not None:
+                        self._pp_timeline_var.set(self._pp_reels[self._pp_current_reel].get("reel_label", ""))
+                    self._pp_set_timeline_dropdown_enabled(True)
                 if manage_thinking:
                     self._stop_thinking()
                 self._pp_resize_window()
@@ -2833,6 +3154,13 @@ class VFXExporterApp(tk.Tk):
             if not silent:
                 self.after(0, lambda err=str(e): self._pp_nest_status.config(
                     text=f"✗ Scan failed: {err}", fg=TEXT_ERROR))
+                # Same reasoning as the success path above — a failed
+                # scan shouldn't leave the dropdown stuck on "SCANNING"
+                # and locked either.
+                self.after(0, lambda: self._pp_set_timeline_dropdown_enabled(True))
+                if getattr(self, "_pp_timeline_var", None) is not None and self._pp_current_reel is not None:
+                    self.after(0, lambda: self._pp_timeline_var.set(
+                        self._pp_reels[self._pp_current_reel].get("reel_label", "")))
             else:
                 self._pp_log(f"⚠ Background scan of a reel failed: {e}", "warn")
             if manage_thinking:
@@ -2848,7 +3176,7 @@ class VFXExporterApp(tk.Tk):
             lbl = tk.Label(self._pp_nest_chips_frame, text=label,
                             font=("SF Pro Display", 10, "bold"),
                             bg="#252525", fg="#888888", anchor="w")
-            lbl.pack(anchor="w", pady=(4, 2))
+            lbl.pack(anchor="w", pady=(2, 2))
             reel["label_widget"] = lbl
         tw, th, r, gap = 54, 24, 6, 5
         cw, ch = tw + 2, th + 2
@@ -2923,7 +3251,7 @@ class VFXExporterApp(tk.Tk):
                 continue
             lbl = reel.get("label_widget")
             if lbl is not None:
-                lbl.pack(anchor="w", pady=(4, 2))
+                lbl.pack(anchor="w", pady=(2, 2))
             for r in self._pp_reel_chip_rows(reel):
                 r.pack(anchor="w", pady=(0, 2))
         self._pp_resize_window()
@@ -2977,13 +3305,15 @@ class VFXExporterApp(tk.Tk):
 
     def _pp_on_nest_all_toggled(self):
         """Nest All makes timeline selection moot — lock the dropdown while
-        it's checked and eagerly scan every remaining STRINGOUT timeline so
-        the full episode plan is visible before Nest Episodes is even clicked."""
+        it's checked. No scan needed here: every reel is already known by
+        the time this checkbox is even clickable — it stays disabled until
+        _pp_finish_initial_scan's eager connect-time prescan has fully
+        finished (see _pp_prescan_all_reels), which now always scans
+        every reel up front rather than lazily on selection."""
         checked = self._pp_nest_all_var.get()
         if checked:
             self._pp_set_timeline_dropdown_enabled(False)
             self._pp_sync_ep_entry_enabled()
-            self._pp_prescan_all_reels()
         elif not self._pp_nesting_active:
             self._pp_set_timeline_dropdown_enabled(True)
             self._pp_sync_ep_entry_enabled()
@@ -3008,24 +3338,28 @@ class VFXExporterApp(tk.Tk):
         self._pp_refresh_chip_visibility()
 
     def _pp_prescan_all_reels(self, arm_first=False):
-        """Background-scans every STRINGOUT timeline not yet armed as a reel,
-        in the same chronological order the dropdown lists them, so every
-        reel's episode count is known before any of them get a Starting
-        Episode # — without this, a reel's numbering only accounts for
-        whatever's been scanned before it, so jumping straight to Reel 3
-        without ever having visited Reel 2 would shortchange its numbering.
+        """Background-scans every STRINGOUT timeline not yet armed as a
+        reel, in the same chronological order the dropdown lists them,
+        always eagerly through the whole list regardless of Nest All —
+        every reel's title-card track, episode count, and tails are all
+        known right after Connect to Premiere/Rescan Reels, not scanned
+        lazily on demand. (An earlier on-demand-per-selection version of
+        this made picking a track in Manual mode for a reel other than
+        the currently-armed one meaningfully more complex than it needed
+        to be, and made Nest All's own eager top-up scan a separate,
+        redundant code path with its own bug surface — simpler and more
+        predictable to just always scan everything up front once.)
 
         All scans here run strictly one at a time on a single background
         thread — deliberately, since scanning two sequences concurrently
         from separate threads is untested territory for the Premiere
-        scripting bridge. The dropdown is locked for the duration (even
-        outside Nest All) so a manual pick can't spawn a second scan
-        thread mid-prescan; it's restored to whatever the dropdown should
-        actually be once this finishes. arm_first=True displays whichever
-        reel is scanned first (used on initial connect, replacing what
-        used to be a separate single-reel scan); everything after that —
-        and every scan when arm_first=False (Nest All's top-up) — stays
-        silent/background so it never yanks the screen away mid-scan.
+        scripting bridge. The dropdown is locked for the duration so a
+        manual pick can't spawn a second scan thread mid-prescan; it's
+        restored to whatever the dropdown should actually be once this
+        finishes. arm_first=True displays whichever reel is scanned
+        first (used on initial connect/Rescan Reels) — every other reel
+        in the list still gets scanned right after it, just silently
+        (background, no screen-yanking).
 
         Re-entrancy guarded: Nest All is enabled the moment the dropdown
         appears, which is before the initial connect-time prescan (this
@@ -3037,31 +3371,72 @@ class VFXExporterApp(tk.Tk):
         as duplicate "REEL 1" chip rows)."""
         if not self._pp_stringout_map or self._pp_prescan_active:
             return
+        # A previous prescan's Reset Nest interruption doesn't stay
+        # armed for the NEXT one — see _pp_prescan_abort.
+        self._pp_prescan_abort = False
         self._pp_set_timeline_dropdown_enabled(False)
+
+        def _on_stop():
+            # STOP's abort for this batch — reuses the same interrupt
+            # flag Reset Nest already uses (see _pp_reset_nest/
+            # _pp_prescan_abort); the loop below and _pp_scan_tracks's
+            # own mid-track check both already honor it, and the
+            # finally block below always runs _stop_thinking() (and
+            # re-enables/relabels the dropdown appropriately) regardless
+            # of how the loop actually exited, so nothing further is
+            # needed here.
+            self._pp_prescan_abort = True
+            # Nest All implies "the full episode plan across every reel
+            # is known" — if this scan got cut short, that's no longer
+            # true, so leaving the checkbox checked would be a lie.
+            if self._pp_nest_all_var.get():
+                self._pp_nest_all_var.set(False)
+                self._pp_nest_all_check.refresh()
+                self._pp_on_nest_all_toggled()
+
+        # Called synchronously here — every caller of this method
+        # (Connect to Premiere's _pp_show_timeline_dropdown, Rescan
+        # Reels) already runs on the main thread — rather than deferred
+        # via self.after(0, ...) from inside the background task below.
+        # Deferring it used to race against Connect to Premiere's own
+        # _stop_thinking() call, queued right after this same launcher
+        # returns from _pp_connect_task's OWN background thread: if
+        # that already-queued _stop_thinking() ran before the newly
+        # spawned prescan thread's deferred _start_thinking() request
+        # even landed in Tk's queue, _thinking_depth could hit 0 and
+        # tear the STOP takeover down immediately — visible live as
+        # STOP flickering back to RESET ALL and STAYING there for the
+        # rest of the scan (reproduced in
+        # test_stop_flicker_during_connect_handoff.py). Calling it here
+        # makes the ordering deterministic instead of a timing race.
+        self._start_thinking(on_stop=_on_stop)
         import threading
         threading.Thread(target=self._pp_prescan_all_reels_task, args=(arm_first,), daemon=True).start()
 
     def _pp_prescan_all_reels_task(self, arm_first=False):
         self._pp_prescan_active = True
-        self.after(0, self._start_thinking)
         try:
             primary_done = not arm_first
             for label, (name, seq) in list(self._pp_stringout_map.items()):
-                if not self._pp_connected or self._pp_skip_nest_mode:
+                if not self._pp_connected or self._pp_skip_nest_mode or self._pp_prescan_abort:
                     # RESET ALL ran while this was still working through
                     # the list (stop rather than repopulating self._pp_reels,
-                    # which the reset just emptied, with stale scans), or
-                    # Skip Nest was clicked mid-scan — Phase 1's reel model
-                    # is moot now, so stop making real ExtendScript calls to
+                    # which the reset just emptied, with stale scans), Skip
+                    # Nest was clicked mid-scan — Phase 1's reel model is
+                    # moot now, so stop making real ExtendScript calls to
                     # scan reels whose results would just get discarded
                     # anyway (see the _pp_skip_nest_mode check in
-                    # _pp_rescan_current_reel's _apply()).
+                    # _pp_rescan_current_reel's _apply()) — or Reset Nest
+                    # interrupted this without disconnecting at all (see
+                    # _pp_prescan_abort).
                     break
                 seq_id = seq._pymiere_id
                 if any(r["seq_id"] == seq_id for r in self._pp_reels):
                     continue
                 self._pp_track_idx = None
                 self._pp_tails_tc = None
+                self.after(0, lambda l=label: self._pp_nest_status.config(
+                    text=f"Scanning {l} for title card track...", fg=TEXT_MUTED))
                 # Passed as a real parameter, not the old shared
                 # self._pp_pending_reel_label scratch attribute — this
                 # loop moves on to the next reel (on this same background
@@ -3074,38 +3449,65 @@ class VFXExporterApp(tk.Tk):
                 primary_done = True
         finally:
             self._pp_prescan_active = False
-            self.after(0, self._stop_thinking)
-            # Don't blindly re-unlock — a Skip Nest click mid-scan already
-            # locked this down deliberately, and this callback (queued
-            # before that click, running after it) shouldn't undo it.
-            self.after(0, lambda: self._pp_set_timeline_dropdown_enabled(
-                not self._pp_nest_all_var.get() and not self._pp_skip_nest_mode))
-            if arm_first:
-                self.after(0, self._pp_finish_initial_scan)
-            else:
-                # arm_first's path re-evaluates this itself via
-                # _pp_finish_initial_scan — this covers the other case
-                # (Nest All's silent top-up scan), which otherwise never
-                # re-checked Nest Episodes' enabled state/label once new
-                # reels landed.
-                self.after(0, self._pp_refresh_nest_button_enabled)
+
+            def _finish():
+                # All three land in the same callback (one paint cycle)
+                # deliberately — previously scheduled as three separate
+                # self.after(0, ...) calls, which left a visible gap
+                # where e.g. the REEL dropdown was already clickable but
+                # Nest Episodes hadn't enabled yet, or STOP had already
+                # flipped back to RESET ALL a beat before either of
+                # those. Now RESET ALL restores, Nest Episodes/circle
+                # done, and the dropdown unlocking all happen together.
+                self._stop_thinking()
+                if arm_first:
+                    self._pp_finish_initial_scan()
+                else:
+                    # arm_first's path re-evaluates this itself via
+                    # _pp_finish_initial_scan — this covers the other case
+                    # (Nest All's silent top-up scan), which otherwise never
+                    # re-checked Nest Episodes' enabled state/label once new
+                    # reels landed.
+                    self._pp_refresh_nest_button_enabled()
+                # Don't blindly re-unlock — a Skip Nest click mid-scan
+                # already locked this down deliberately, and this
+                # callback (queued before that click, running after it)
+                # shouldn't undo it.
+                self._pp_set_timeline_dropdown_enabled(
+                    not self._pp_nest_all_var.get() and not self._pp_skip_nest_mode)
+            self.after(0, _finish)
 
     def _pp_finish_initial_scan(self):
-        """Called once the connect-time pre-load of every reel has
-        finished. Swaps the dropdown's "SCANNING REELS..." placeholder for
-        the actually-armed reel's real label, and only now marks Connect
-        to Premiere's step circle done — showing the checkmark the moment
-        the connection itself succeeded, while the dropdown still read
-        "SCANNING REELS..." and was locked, looked like a step that had
-        finished but wasn't actually usable yet."""
+        """Called once the connect-time pre-load of EVERY reel — not just
+        the first one — has finished. Swaps the dropdown's "SCANNING"
+        placeholder for the actually-armed reel's real label, and only
+        now marks Connect to Premiere's step circle done (checkmark) and
+        Nest Episodes' circle active — showing the checkmark the moment
+        the whole batch genuinely finished, not the instant the first
+        reel's own scan happened to land while its siblings were still
+        being scanned in the background (see _pp_rescan_current_reel's
+        _apply(), which used to do exactly that)."""
         self._pp_set_circle_done(self._pp_circ_p1_1)
         if self._pp_current_reel is not None and getattr(self, "_pp_timeline_var", None) is not None:
             reel = self._pp_reels[self._pp_current_reel]
             self._pp_timeline_var.set(reel.get("reel_label", ""))
+            self._pp_nest_status.config(text=f"✓ Connected — {reel.get('seq_name', '')}", fg="#50e050")
+            self._pp_set_circle_active(self._pp_circ_p1_2, "2")
+        elif getattr(self, "_pp_timeline_var", None) is not None:
+            # STOP cancelled the very first reel's scan before anything
+            # ever got armed — don't leave the dropdown stuck reading
+            # "SCANNING" forever with nothing to show for it.
+            self._pp_timeline_var.set("")
         # Whole prescan batch is done now (_pp_prescan_active just flipped
         # back to False) — only now is it actually safe to enable Nest
         # Episodes, since other reels are no longer scanning in the background.
         self._pp_refresh_nest_button_enabled()
+        # Same reasoning applies to Mute Master Clips/Nest All — clickable
+        # only once scanning is genuinely finished, not while the dropdown
+        # still reads "SCANNING".
+        if not self._pp_skip_nest_mode:
+            self._pp_mute_check.set_enabled(True)
+            self._pp_nest_all_check.set_enabled(True)
 
     def _pp_find_next_unfinished_reel(self, start_from=0):
         """First reel (in chronological order, at or after start_from) that
@@ -3127,8 +3529,12 @@ class VFXExporterApp(tk.Tk):
             # Pass 1: Find episode track (sample 3 clips per track above V8)
             # Also do a quick tails scan on the last clip of each track above V4
             for t in range(num_tracks):
-                if self._pp_skip_nest_mode or not self._pp_connected:
-                    # Skip Nest was clicked, or RESET ALL ran, mid-scan —
+                if self._pp_skip_nest_mode or not self._pp_connected or self._pp_prescan_abort or self._pp_scan_cancel:
+                    # Skip Nest was clicked, RESET ALL ran, Reset Nest
+                    # interrupted a still-running prescan (without
+                    # disconnecting — see _pp_prescan_abort), or STOP
+                    # cancelled just this one scan (see _pp_scan_cancel),
+                    # mid-scan —
                     # the batch loop in _pp_prescan_all_reels_task only
                     # checks this between reels, so without this a reel
                     # with a lot of tracks could keep making real
@@ -3193,7 +3599,18 @@ class VFXExporterApp(tk.Tk):
                 # closest to a typical reel size (~20 episodes) rather than
                 # just the first or the largest — a stray short/unrelated
                 # graphics-only track could otherwise still outrank the real one.
-                if is_episode and t >= 7:
+                # n_clips <= 60 is a hard sanity ceiling, not a tuning knob —
+                # a captions/lower-third/graphics track can legitimately use
+                # the same "Graphic"-named MOGRT clips as real title cards
+                # (see is_graphic_title's comment) but with hundreds of tiny
+                # clips instead of a season's worth of episodes; without this,
+                # a false-positive on such a track wins by DEFAULT whenever
+                # it's the only candidate matching the naming heuristic at
+                # all, regardless of how implausible its count is (seen live:
+                # a 460-clip captions track got auto-selected as "the episode
+                # track" for a reel whose own STRINGOUT filename said EP01-20
+                # — 20 real episodes).
+                if is_episode and t >= 7 and n_clips <= 60:
                     score = abs(n_clips - 20)
                     if found_episode_track is None or score < abs(found_episode_track[3] - 20):
                         found_episode_track = (t, label, avg_dur, n_clips, sample_names)
@@ -3222,6 +3639,16 @@ class VFXExporterApp(tk.Tk):
                 else:
                     display["auto_label"] = "Could not auto-detect — please select manually"
 
+            # Manual mode's per-reel picker only offers tracks that
+            # actually exist in THIS reel (candidate_tracks already
+            # excludes empty ones) and have a plausible clip count —
+            # keeps a captions/graphics track with hundreds of clips (or
+            # any other track that's obviously not title cards) from
+            # ever being pickable at all, not just deprioritized in
+            # auto-detection scoring above.
+            display["manual_options"] = sorted(
+                t_idx for t_idx, _, _, n_clips, _ in candidate_tracks if n_clips <= 30)
+
             # Tails
             if tails_tc is not None:
                 self._pp_tails_tc = tails_tc
@@ -3238,25 +3665,11 @@ class VFXExporterApp(tk.Tk):
                 display["tails_text"] = "⚠ No tails clip found — last episode will end at sequence end"
                 display["tails_fg"] = TEXT_WARN
 
-            # Populate manual dropdown — only episode candidates or detected by clip count (15-30 clips, V8+)
-            ep_candidates = [(t_idx, label, avg_dur, n_clips)
-                             for t_idx, label, avg_dur, n_clips, is_ep in candidate_tracks
-                             if is_ep or (t_idx >= 7 and 15 <= n_clips <= 30)]
-            if not ep_candidates:
-                ep_candidates = [(t_idx, label, avg_dur, n_clips)
-                                 for t_idx, label, avg_dur, n_clips, _ in candidate_tracks
-                                 if t_idx >= 7]
-            manual_map = {label: t_idx for t_idx, label, _, _ in ep_candidates}
-            labels = [label for _, label, _, _ in ep_candidates]
-            display["manual_map"] = manual_map
-            display["manual_options"] = labels
-            if not silent:
-                self._pp_manual_track_map = manual_map
-            display["manual_selected"] = ""
-            if ep_candidates:
-                default = ep_candidates[0][1] if not found_episode_track else \
-                    f"V{found_episode_track[0]+1} — {found_episode_track[3]} clips · avg {found_episode_track[2]:.1f}s"
-                display["manual_selected"] = default
+            _label = reel_label or seq.name
+            self._pp_log(f"{_label}: title card track — {display.get('auto_label', 'not detected')}.",
+                         "success" if self._pp_track_idx is not None else "warn")
+            self._pp_log(f"{_label}: {display['tails_text']}.",
+                         "warn" if tails_tc is None else "muted")
 
             if not silent:
                 self.after(0, lambda: self._connect_status.config(text=""))
@@ -3271,9 +3684,12 @@ class VFXExporterApp(tk.Tk):
                 self.after(0, self._stop_thinking)
             if not silent:
                 self.after(0, lambda: self._connect_status.config(text=""))
-                self.after(0, lambda err=str(e): self._pp_track_auto_var.set(f"Scan failed: {err}"))
                 self.after(0, lambda err=str(e): self._pp_nest_status.config(
                     text=f"✗ Scan failed: {err}", fg=TEXT_ERROR))
+                box = self._pp_track_auto_boxes.get(reel_label) if reel_label else None
+                if box is not None:
+                    self.after(0, lambda err=str(e): box["hint"].config(
+                        text=f"Scan failed: {err}", fg=TEXT_ERROR))
             else:
                 self._pp_log(f"⚠ Background scan of a reel failed: {e}", "warn")
 
@@ -3283,13 +3699,30 @@ class VFXExporterApp(tk.Tk):
         folder; TRAILER is a sibling of FINAL directly under DELIVERY.
         Stops at the first DELIVERY/FINAL combo that yields a LIVE folder
         (matching the original single-folder behavior) but still checks
-        for MARKETING/SRT/TRAILER siblings before returning."""
+        for MARKETING/SRT/TRAILER siblings before returning.
+
+        Logs each step the same way the VFX tab's find_output_folder
+        does (which volumes matched, what was ultimately found) so a
+        failed auto-detect is debuggable from the log instead of the
+        Output Folder section just silently staying empty."""
         import glob
         sc = self.pp_show_code.get().strip()
         if not sc:
             return
         import re
         base = re.sub(r'^[A-Z]-', '', sc)
+        all_vols = []
+        for code in [sc, f"V-{base}", f"I-{base}", base]:
+            all_vols.extend(glob.glob(f"/Volumes/{code}_*"))
+        all_vols = sorted(set(all_vols))
+        self._pp_log(
+            f"Output folder auto-detect: show code \"{sc}\" -> "
+            f"{len(all_vols)} volume(s) matched" +
+            (f" ({', '.join(all_vols)})" if all_vols else ""), "muted")
+        if not all_vols:
+            self._pp_log("Output folder not found — no matching volume. Please browse to "
+                          "select your output folder manually.", "warn")
+            return
         for code in [sc, f"V-{base}", f"I-{base}", base]:
             vols = glob.glob(f"/Volumes/{code}_*")
             for vol in sorted(vols):
@@ -3311,27 +3744,33 @@ class VFXExporterApp(tk.Tk):
                                     continue
                                 found = lives[0]
                                 self.after(0, lambda p=found: self._pp_out_dir.set(p))
+                                self._pp_log(f"Output folder: {found}", "success")
                                 markets = [os.path.join(final, d) for d in os.listdir(final)
                                            if "MARKETING" in d.upper()
                                            and os.path.isdir(os.path.join(final, d))]
                                 if markets:
                                     mfound = markets[0]
                                     self.after(0, lambda p=mfound: self._pp_marketing_out_dir.set(p))
+                                    self._pp_log(f"Marketing output folder: {mfound}", "success")
                                 srts = [os.path.join(final, d) for d in os.listdir(final)
                                         if "SRT" in d.upper()
                                         and os.path.isdir(os.path.join(final, d))]
                                 if srts:
                                     sfound = srts[0]
                                     self.after(0, lambda p=sfound: self._pp_srt_out_dir.set(p))
+                                    self._pp_log(f"SRT output folder: {sfound}", "success")
                                 trailers = [os.path.join(deliv, d) for d in os.listdir(deliv)
                                             if "TRAILER" in d.upper()
                                             and os.path.isdir(os.path.join(deliv, d))]
                                 if trailers:
                                     tfound = trailers[0]
                                     self.after(0, lambda p=tfound: self._pp_trailer_out_dir.set(p))
+                                    self._pp_log(f"Trailer output folder: {tfound}", "success")
                                 return
                     except Exception:
                         continue
+        self._pp_log("Output folder not found — no DELIVERY > FINAL > LIVE folder under any "
+                      "matched volume. Please browse to select your output folder manually.", "warn")
 
     def _pp_autofill_from_name(self, name):
         """Parse timeline name and fill show info."""
@@ -3454,53 +3893,119 @@ class VFXExporterApp(tk.Tk):
         collide with ones already sitting in the project's DELIVERY > FINAL
         bin (from an earlier nest run, e.g. renested after QC notes) — not
         the AME export queue, despite the similar-sounding name; see
-        _pp_scan_project_final_ep_seqs. "Don't show this again" only pairs
-        with Yes (silently overwrite from then on) — skipping stays a
-        conscious per-conflict decision, never silent, so episodes can't
-        quietly vanish without the editor noticing. Returns True (overwrite)
-        or False (skip the collisions)."""
+        _pp_scan_project_final_ep_seqs.
+
+        "Apply to all reels" (Nest All only — a single-reel run only ever
+        has one collision-check anyway) is a checkbox, not a separate
+        pair of buttons: check it before clicking Yes or No and that
+        answer is remembered and silently reused for every later
+        collision, but ONLY for the rest of THIS nesting task — reset
+        back to "ask again" (and the checkbox back to unchecked) at the
+        start of every genuinely fresh (non-resume, non-auto_chained)
+        Nest Episodes click, see _pp_run_autonest. Left unchecked (the
+        default), Yes/No only answer for this one collision, same as
+        always. This replaced an earlier "Yes to All"/"No to All"
+        button-pair design — same remember-for-this-task mechanism
+        underneath, just fewer buttons competing for room in the row.
+
+        Cancel is a third, distinct choice from No — that just skips the
+        colliding episode(s) and keeps going with the rest of the nest;
+        Cancel abandons the nest run entirely, same as hitting STOP right
+        here would. It just sets self._pp_stop_nest (the same flag STOP
+        itself sets) before closing — this method's caller,
+        _pp_precheck_and_start_nest's _finish(), already checks that flag
+        first thing and routes to _pp_abort_precheck_stop() in that case,
+        so no separate cancel-handling path is needed here. Closing the
+        dialog via its window-close button behaves the same way, not as
+        an implicit "No" — silently skipping episodes on a stray click
+        felt riskier than just stopping and letting the editor decide
+        again.
+
+        Returns True (overwrite) or False (skip the collisions) — the
+        return value is meaningless when Cancel was chosen, since the
+        caller bails out on self._pp_stop_nest before ever reading it."""
         ep_list = ", ".join(f"EP{n:02d}" for n in sorted(ep_nums))
         result = {"value": False}
         dlg = tk.Toplevel(self)
-        dlg.title("Episodes Already Nested")
+        dlg.withdraw()  # see _pp_alert_dialog's withdraw for why
+        dlg.title("Overwrite?")
         dlg.configure(bg=BG_DARK)
         dlg.resizable(False, False)
         dlg.transient(self)
 
         body = tk.Frame(dlg, bg=BG_DARK, padx=24, pady=20)
         body.pack(fill="both", expand=True)
-        tk.Label(body, text="Episodes Already Nested", font=("SF Pro Display", 16, "bold"),
+        tk.Label(body, text="Overwrite?", font=("SF Pro Display", 16, "bold"),
                  bg=BG_DARK, fg=ACCENT, anchor="w").pack(anchor="w", pady=(0, 8))
-        tk.Label(body, text=f"Nested episode sequences with these numbers already exist in "
-                             f"the project's DELIVERY > FINAL bin: {ep_list}. Would you like "
-                             f"to overwrite them?",
+        tk.Frame(body, bg=ACCENT, height=1).pack(fill="x", pady=(0, 8))
+        tk.Label(body, text="Nested episode sequences with these numbers already exist in "
+                             "the project's DELIVERY > FINAL bin:",
+                 font=FONT_LABEL, bg=BG_DARK, fg=TEXT_MUTED,
+                 wraplength=380, justify="left", anchor="w").pack(anchor="w", pady=(0, 8))
+        tk.Label(body, text=ep_list, font=("SF Pro Display", 12, "bold"),
+                 bg=BG_DARK, fg=self.EXP_LIVE_TXT,
+                 wraplength=380, justify="left", anchor="w").pack(anchor="w")
+        # Two blank lines of breathing room before the question — real
+        # empty Labels at the body font's own size, not a fixed-pixel
+        # margin, so the gap scales the same way actual text would.
+        tk.Label(body, text="", font=FONT_LABEL, bg=BG_DARK).pack(anchor="w")
+        tk.Label(body, text="", font=FONT_LABEL, bg=BG_DARK).pack(anchor="w")
+        tk.Label(body, text="Would you like to overwrite them?",
                  font=FONT_LABEL, bg=BG_DARK, fg=TEXT_MUTED,
                  wraplength=380, justify="left", anchor="w").pack(anchor="w", pady=(0, 16))
-
-        dont_show_var = tk.BooleanVar(value=False)
-        dont_show_check = self._canvas_checkbox(body, dont_show_var,
-                                                 "Don't show this again (always overwrite)")
-        dont_show_check.pack(anchor="w", pady=(0, 16))
 
         btn_row = tk.Frame(body, bg=BG_DARK)
         btn_row.pack(anchor="e", fill="x")
 
-        def _answer(val):
+        # Always exists (even for a single-reel run, where the checkbox
+        # itself is never shown/packed below) so Yes/No's lambdas can
+        # read it unconditionally — it just always reads False in that
+        # case, which is exactly the old plain-Yes/No behavior.
+        apply_all_var = tk.BooleanVar(value=False)
+
+        def _answer(val, remember=False):
             result["value"] = val
-            if val and dont_show_var.get():
+            if remember:
                 self._pp_hide_overwrite_prompt = True
+                self._pp_overwrite_remembered_answer = val
             dlg.destroy()
 
-        no_btn = self._rounded_btn(btn_row, "No", lambda: _answer(False))
-        no_btn.pack(side="right")
-        yes_btn = self._rounded_btn(btn_row, "Yes", lambda: _answer(True), accent=True)
-        yes_btn.pack(side="right", padx=(0, 8))
+        def _cancel():
+            self._pp_stop_nest = True
+            dlg.destroy()
 
-        dlg.protocol("WM_DELETE_WINDOW", lambda: _answer(False))
+        # Sits apart from the Yes/No/checkbox group, at the opposite
+        # edge — a separate, higher-stakes choice (abandon the whole
+        # nest run), not another answer to "would you like to overwrite
+        # them?".
+        cancel_btn = self._rounded_btn(btn_row, "Cancel", _cancel)
+        cancel_btn.pack(side="left")
+
+        # The checkbox only makes sense when there's more than one
+        # reel's worth of collisions actually coming — a single-reel run
+        # only ever shows this dialog once regardless.
+        show_apply_all = self._pp_nest_all_var.get()
+
+        # side="right" stacks right-to-left — the FIRST widget packed
+        # ends up at the absolute right edge, each next one lands to its
+        # left. Packed in this order (Yes, No, checkbox) to get the
+        # visual result reading left to right: [Apply to all reels] No
+        # Yes — the checkbox sits just left of No, modifying whichever
+        # of the two you go on to click.
+        yes_btn = self._rounded_btn(btn_row, "Yes", lambda: _answer(True, remember=apply_all_var.get()), accent=True)
+        yes_btn.pack(side="right")
+        no_btn = self._rounded_btn(btn_row, "No", lambda: _answer(False, remember=apply_all_var.get()))
+        no_btn.pack(side="right", padx=(0, 8))
+        if show_apply_all:
+            apply_all_check = self._canvas_checkbox(btn_row, apply_all_var, "Apply to all reels")
+            apply_all_check.pack(side="right", padx=(0, 12))
+
+        dlg.protocol("WM_DELETE_WINDOW", _cancel)
         dlg.update_idletasks()
         x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_reqwidth()) // 2
         y = self.winfo_rooty() + (self.winfo_height() - dlg.winfo_reqheight()) // 2
         dlg.geometry(f"+{x}+{y}")
+        dlg.deiconify()
         dlg.grab_set()
         dlg.wait_window()
         return result["value"]
@@ -3539,13 +4044,24 @@ class VFXExporterApp(tk.Tk):
         reel = self._pp_reels[self._pp_current_reel]
 
         if not resume:
-            if not auto_chained and not self._pp_hide_before_start_warning:
+            if not auto_chained:
+                # "Yes to All"/"No to All" (see _pp_overwrite_dialog) only
+                # apply for the duration of a single nesting task — reset
+                # here, at the same "genuinely fresh start" boundary the
+                # "Before You Start" reminder already uses (not on every
+                # reel within a Nest All chain, just the first one), so a
+                # LATER, unrelated Nest Episodes click always asks again
+                # instead of silently inheriting a choice from before.
+                self._pp_hide_overwrite_prompt = False
+                self._pp_overwrite_remembered_answer = True
+            if not auto_chained:
                 proceed = self._pp_alert_dialog(
                     "Before You Start",
                     "Make sure all your tracks — including captions — are selected "
-                    "(highlighted blue) in Premiere, so everything gets included in "
-                    "the nested episodes.",
-                    show_illustration=True)
+                    "(highlighted blue) in Premiere.",
+                    show_illustration=True,
+                    tip="Tracks left deselected won't be included in the nested "
+                        "episodes — leave out anything you don't need.")
                 if not proceed:
                     return
 
@@ -3651,6 +4167,10 @@ class VFXExporterApp(tk.Tk):
                 overwrite = self._pp_overwrite_dialog(colliding)
                 _finish(overwrite)
             self.after(0, _ask)
+        elif colliding:
+            # "Don't show this again" was already checked on an earlier
+            # reel — reuse that same Yes/No answer instead of re-asking.
+            self.after(0, lambda: _finish(self._pp_overwrite_remembered_answer))
         else:
             self.after(0, lambda: _finish(True))
 
@@ -3786,8 +4306,8 @@ class VFXExporterApp(tk.Tk):
         self._pp_nesting_active = False
         self._pp_nest_all_var.set(False)
         self._pp_nest_all_check.set_enabled(False)
-        self._pp_hide_before_start_warning = False
         self._pp_hide_overwrite_prompt = False
+        self._pp_overwrite_remembered_answer = True
         self._pp_style_vars["LIVE"].set(True)
         self._pp_style_vars["MARKETING"].set(False)
         self._pp_style_vars["SOCIAL MEDIA"].set(False)
@@ -3839,13 +4359,18 @@ class VFXExporterApp(tk.Tk):
         # Reset title card track (always-enabled section, independent of
         # connect state — unless Skip Nest locked it, which this undoes)
         self._pp_track_mode.set("auto")
-        self._pp_track_auto_var.set("")
-        self._pp_track_var.set("")
-        self._pp_track_dropdown.set_options([])
+        # Rebuilds from self._pp_stringout_map — a single default "REEL 1"
+        # placeholder box in each mode unless keep_premiere_connection
+        # left it populated, in which case these show fresh, blank boxes
+        # for the still-known reels (their individual track picks were
+        # just wiped above along with self._pp_reels, same as everything
+        # else this reset clears).
+        self._pp_build_auto_track_boxes()
+        self._pp_build_manual_track_boxes()
         if self._pp_track_radios:
             self._pp_track_radios[0].set_locked(False)
-        self._pp_track_dropdown.set_locked(False)
-        self._pp_track_auto_display.set_locked(False)
+        for box in self._pp_track_auto_boxes.values():
+            box["dropdown"].set_locked(False)
         self._pp_on_track_mode_change()
         # Reset nest step
         self._pp_set_circle_active(self._pp_circ_p1_2, "2")
@@ -3890,6 +4415,7 @@ class VFXExporterApp(tk.Tk):
         self._set_btn_state(self.btn_pp_stop_exp, False)
         self._set_btn_state(self.btn_pp_reset_exp, False)
         self._pp_exp_progress_var.set(0)
+        self._pp_reset_exp_progress_color()
         self._pp_exp_status.config(text="", fg=TEXT_MUTED)
         self._pp_destroy_all_exp_chips()
         self.btn_toggle_exp_all.config(text="DISABLE ALL")
@@ -3916,7 +4442,22 @@ class VFXExporterApp(tk.Tk):
         subsequences are left alone (just untracked/unqueued). Also purges
         the reset reel(s)' episode names from the export queue's permanent
         queued/disabled tracking, so a reset-and-renest doesn't wrongly
-        inherit a stale "already queued" state from before the reset."""
+        inherit a stale "already queued" state from before the reset.
+
+        Also a safety valve for _thinking_depth (see _start_thinking/
+        _stop_thinking) — Reset Nest is the way to bail out of a reel
+        prescan that looks stuck, so it should always be able to clear
+        the shared spinner/STOP state outright. And, critically,
+        _pp_prescan_abort=True actually interrupts a still-running
+        background prescan thread itself — without this, that thread
+        just kept running to completion in the background regardless of
+        anything Reset Nest did visually, appending reels to
+        self._pp_reels at unpredictable times and racing against whatever
+        the editor did next (seen live as reels ending up out of order
+        after Nest All)."""
+        self._thinking_depth = 0
+        self._thinking_active = False
+        self._pp_prescan_abort = True
         if self._pp_current_reel is None:
             return
         target_idxs = set(range(len(self._pp_reels))) if (force_all or self._pp_nest_all_var.get()) \
@@ -3973,7 +4514,13 @@ class VFXExporterApp(tk.Tk):
         and swaps the timeline dropdown for a "Rescan Reels" button (see
         _pp_swap_dropdown_for_rescan_button) — so nesting can pick back up
         from a fresh scan instead of reusing whatever track/tails data
-        was already scanned, without needing to reconnect to Premiere."""
+        was already scanned, without needing to reconnect to Premiere.
+
+        Also resets the step circles and the Title Card Track section
+        (both modes) back to their default look — previously left
+        showing whatever they last displayed even though self._pp_reels
+        (every reel's scanned track/tails data) was just wiped, which
+        was stale/misleading until the next Rescan Reels landed."""
         if not self._pp_reels:
             return
         self._pp_reset_nest(force_all=True)
@@ -3984,6 +4531,21 @@ class VFXExporterApp(tk.Tk):
         self._set_btn_state(self.btn_pp_reset_nest, False)
         self._pp_sync_ep_entry_enabled()
         self._pp_swap_dropdown_for_rescan_button()
+        # Step circles: circle 1's slot needs a new action (Rescan Reels)
+        # before circle 2 (Nest Episodes) is reachable again, same as a
+        # fresh Connect to Premiere would.
+        self._pp_set_circle_active(self._pp_circ_p1_1, "1")
+        self._pp_set_circle_disabled(self._pp_circ_p1_2, "2")
+        self._pp_track_mode.set("auto")
+        self._pp_build_auto_track_boxes()
+        self._pp_build_manual_track_boxes()
+        self._pp_on_track_mode_change()
+        # Nest All's "the full plan across every reel is known" premise
+        # no longer holds once self._pp_reels has just been wiped —
+        # back to unchecked, matching a fresh connect's default.
+        if self._pp_nest_all_var.get():
+            self._pp_nest_all_var.set(False)
+            self._pp_nest_all_check.refresh()
         self._pp_resize_window()
 
     def _pp_autonest_task(self, reel, sc, ac, dt, mute_ref=True):
@@ -4005,12 +4567,51 @@ class VFXExporterApp(tk.Tk):
             total = reel["total"]
             resume_from = reel["resume_idx"]
 
+            # One scan of the FINAL bin for the whole reel (not per-episode)
+            # — the real, authoritative source for collisions, catching an
+            # episode nested in a prior session just as well as one from
+            # this one. Keyed by episode number so a renested episode (same
+            # number, different date in the name) is still found as "the
+            # same" episode. Computed up front (not just before the nest
+            # loop below) so all_declined can check it before track
+            # targeting/muting even runs.
+            #
+            # Each key maps to a LIST, not a single (name, seq) pair — if
+            # the project already has more than one sequence sharing the
+            # same episode number (e.g. a prior double-nest, or one
+            # manually duplicated), a single-value dict would silently
+            # keep only the last one scanned and forget the rest existed
+            # at all. That meant overwriting could only ever delete ONE
+            # of the duplicates, leaving the other permanently invisible
+            # to every future collision check — seen live as a demo where
+            # every other episode replaced cleanly but one stayed
+            # doubled no matter how many times it was renested. Every
+            # entry in the list gets deleted below when overwriting.
+            existing_final_seqs = {}
+            for nm, s in self._pp_scan_project_final_ep_seqs():
+                n = self._pp_extract_ep_num(nm)
+                if n is not None:
+                    existing_final_seqs.setdefault(n, []).append((nm, s))
+
+            # If every remaining episode on this reel already exists in
+            # FINAL and the overwrite prompt was declined, nothing here is
+            # actually going to get created — skip the reel outright
+            # (including track targeting/muting, which would otherwise
+            # run for a reel about to produce zero new sequences) instead
+            # of running full setup and then a wall of individual
+            # "Skipping EP##" messages.
+            all_declined = (not reel.get("overwrite_queue", True)) and all(
+                (start_ep + idx) in existing_final_seqs for idx in range(resume_from, total))
+
             # Track targeting + muting only need to happen once per reel — on
             # a resume after a stop, this used to re-run unconditionally,
             # which for a large project meant waiting through the whole
             # (uninterruptible, single ExtendScript call) mute step a second
             # time for no reason. Gate it on the reel itself.
-            if not reel.get("setup_done"):
+            if all_declined:
+                _status(f"⏭ Skipping reel — every remaining episode already nested in "
+                        f"DELIVERY > FINAL, not overwriting.", TEXT_WARN)
+            elif not reel.get("setup_done"):
                 # createSubsequence(False) below determines which tracks' clips get
                 # included by TRACK TARGETING (the blue-highlighted track-header
                 # state, Track.setTargeted) whenever there's no active clip
@@ -4141,17 +4742,8 @@ class VFXExporterApp(tk.Tk):
             if delivery_final_bin is None:
                 _status("⚠ Couldn't find a DELIVERY > FINAL bin — nested episodes will "
                         "go to the project root instead.", TEXT_WARN)
-            # One scan of the FINAL bin for the whole reel (not per-episode)
-            # — the real, authoritative source for collisions, catching an
-            # episode nested in a prior session just as well as one from
-            # this one. Keyed by episode number so a renested episode (same
-            # number, different date in the name) is still found as "the
-            # same" episode.
-            existing_final_seqs = {}
-            for nm, s in self._pp_scan_project_final_ep_seqs():
-                n = self._pp_extract_ep_num(nm)
-                if n is not None:
-                    existing_final_seqs[n] = (nm, s)
+            # existing_final_seqs already scanned up front, before the
+            # track targeting/muting step above.
 
             for idx, tc in enumerate(title_clips):
                 if self._pp_stop_nest:
@@ -4180,13 +4772,35 @@ class VFXExporterApp(tk.Tk):
                 # overwrite prompt shown before this run started was
                 # declined, skip this episode entirely — no orphaned
                 # subsequence gets created for a chip that'll never show it.
-                existing_match = existing_final_seqs.get(ep_num)
-                if existing_match is not None and not reel.get("overwrite_queue", True):
-                    _status(f"⏭ Skipping EP{ep_num:02d} — already nested in DELIVERY > FINAL, "
-                            f"not overwriting.", TEXT_WARN)
+                existing_matches = existing_final_seqs.get(ep_num) or []
+                if existing_matches and not reel.get("overwrite_queue", True):
+                    if not all_declined:
+                        # Every-episode-declined already got one reel-level
+                        # "Skipping reel..." status above — an individual
+                        # message per episode on top of that would just be
+                        # noise. Still shown for a PARTIAL decline (some
+                        # episodes overwritten/new, only some declined),
+                        # where it's the only signal for which ones.
+                        _status(f"⏭ Skipping EP{ep_num:02d} — already nested in DELIVERY > FINAL, "
+                                f"not overwriting.", TEXT_WARN)
                     reel["done"][idx] = True
                     reel["resume_idx"] = idx + 1
                     self._pp_nest_resume_idx = idx + 1
+                    # Track every kept (declined-overwrite) sequence the same
+                    # way a freshly-created one is tracked — this reel's
+                    # Phase 1 chip just turned green for it (done above), so
+                    # Phase 2 should treat it as already-accounted-for too,
+                    # instead of Connect to AME's later scan "discovering"
+                    # it as an unrelated pre-existing episode and defaulting
+                    # it to disabled/grey (see _pp_skip_nest_scan_task). If
+                    # more than one sequence already shares this episode
+                    # number, every one of them gets tracked here — not just
+                    # the first — so Phase 2 knows about all of them instead
+                    # of only the one this dict happened to keep.
+                    for old_name, old_sub in existing_matches:
+                        if not any(nm == old_name for nm, _, _ in self._pp_created_seqs):
+                            self._pp_created_seqs.append((old_name, old_sub, reel_idx))
+                        self._pp_exp_disabled.discard(old_name)
                     self.after(0, lambda r=reel, i=idx: self._pp_set_reel_chip_done(r, i))
                     continue
 
@@ -4219,28 +4833,38 @@ class VFXExporterApp(tk.Tk):
                 except Exception as e:
                     _status(f"⚠ Couldn't move {name}: {e}", TEXT_WARN)
                 created.append(name)
-                if existing_match is not None:
+                if existing_matches:
                     # overwrite_queue is True here — the False case already
                     # skipped above via the continue. Actually delete the
-                    # old sequence from the project — this used to just
-                    # drop it from self._pp_created_seqs, leaving the real
+                    # old sequence(s) from the project — this used to just
+                    # drop one from self._pp_created_seqs, leaving the real
                     # old Premiere sequence behind as an orphaned duplicate
                     # sitting in the FINAL bin, invisible to this app but
-                    # very much still there.
-                    old_name, old_sub = existing_match
-                    try:
-                        ok = pymiere.objects.app.project.deleteSequence(old_sub)
-                        if not ok:
-                            _status(f"⚠ Premiere reported it couldn't delete the old {old_name}.", TEXT_WARN)
-                        else:
-                            _status(f"↻ Overwrote EP{ep_num:02d} — old {old_name} deleted, replaced with {name}.", TEXT_MUTED)
-                    except Exception as e:
-                        _status(f"⚠ Couldn't delete the old {old_name}: {e}", TEXT_WARN)
-                    stale = next((e for e in self._pp_created_seqs if e[0] == old_name), None)
-                    if stale is not None:
-                        self._pp_created_seqs.remove(stale)
-                    self._pp_exp_queued.discard(old_name)
-                    self._pp_exp_disabled.discard(old_name)
+                    # very much still there. Every existing match for this
+                    # episode number gets deleted here, not just one — if
+                    # the project already had more than one sequence
+                    # sharing this number (e.g. from an earlier double-nest),
+                    # a single-delete would leave the others behind forever,
+                    # since nothing else in the project would ever flag them
+                    # as duplicates again.
+                    for old_name, old_sub in existing_matches:
+                        try:
+                            ok = pymiere.objects.app.project.deleteSequence(old_sub)
+                            if not ok:
+                                _status(f"⚠ Premiere reported it couldn't delete the old {old_name}.", TEXT_WARN)
+                            else:
+                                _status(f"↻ Overwrote EP{ep_num:02d} — old {old_name} deleted, replaced with {name}.", TEXT_MUTED)
+                        except Exception as e:
+                            _status(f"⚠ Couldn't delete the old {old_name}: {e}", TEXT_WARN)
+                        stale = next((e for e in self._pp_created_seqs if e[0] == old_name), None)
+                        if stale is not None:
+                            self._pp_created_seqs.remove(stale)
+                        self._pp_exp_queued.discard(old_name)
+                        self._pp_exp_disabled.discard(old_name)
+                    if len(existing_matches) > 1:
+                        _status(f"⚠ EP{ep_num:02d} had {len(existing_matches)} existing sequences in "
+                                f"DELIVERY > FINAL (not just one) — all of them were deleted and "
+                                f"replaced with {name}.", TEXT_WARN)
                     self._pp_created_seqs.append((name, sub, reel_idx))
                 else:
                     self._pp_created_seqs.append((name, sub, reel_idx))
@@ -4402,8 +5026,10 @@ class VFXExporterApp(tk.Tk):
         # enabled default it had before this).
         if self._pp_track_radios:
             self._pp_track_radios[0].set_locked(True)
-        self._pp_track_dropdown.set_locked(True)
-        self._pp_track_auto_display.set_locked(True)
+        for box in self._pp_track_manual_boxes.values():
+            box["dropdown"].set_locked(True)
+        for box in self._pp_track_auto_boxes.values():
+            box["dropdown"].set_locked(True)
         self._pp_set_circle_active(self._pp_circ_p2_1, "1")
         self._set_btn_state(self.btn_pp_connect_ame, True)
         self._pp_exp_status.config(
@@ -4501,9 +5127,17 @@ class VFXExporterApp(tk.Tk):
         The LIVE/MARKETING/SOCIAL MEDIA/SRT/UPDATE DATE checkboxes are
         deliberately NOT enabled here — _pp_skip_nest_scan_task enables
         them itself, once its scan (and _pp_build_exp_chips) has actually
-        run, whether or not this is the first click."""
+        run, whether or not this is the first click. They ARE disabled
+        here, though — a "Rescan Episodes" click can happen after an
+        earlier scan already left them enabled, and they shouldn't stay
+        clickable while this new scan is in flight."""
         first_click = not self._pp_ame_connected
         self._set_btn_state(self.btn_pp_connect_ame, False)
+        self._pp_style_checks["LIVE"].set_enabled(False)
+        self._pp_style_checks["MARKETING"].set_enabled(False)
+        self._pp_style_checks["SOCIAL MEDIA"].set_enabled(False)
+        self._pp_srt_check.set_enabled(False)
+        self._pp_update_date_check.set_enabled(False)
         if first_click:
             self._pp_exp_status.config(text="Launching Adobe Media Encoder...", fg=TEXT_MUTED)
             import subprocess
@@ -4519,7 +5153,22 @@ class VFXExporterApp(tk.Tk):
             self.btn_pp_connect_ame._text = "Rescan Episodes"
             self.btn_pp_connect_ame._command = self._pp_connect_ame
         self._pp_exp_status.config(text="Scanning project for nested episodes...", fg=TEXT_MUTED)
-        self._start_thinking()
+        self._pp_ame_scan_cancel = False
+
+        def _on_stop():
+            # AME itself was already launched (if this was the first
+            # click) before the scan started — that can't be undone and
+            # doesn't need to be, only the scan itself is what STOP
+            # should cancel. The scan is a single ExtendScript round
+            # trip with no mid-flight checkpoint, so this reverts
+            # immediately rather than waiting for it to return; the flag
+            # tells _pp_skip_nest_scan_task's _apply() to discard its
+            # result once it eventually does.
+            self._pp_ame_scan_cancel = True
+            self._set_btn_state(self.btn_pp_connect_ame, True)
+            self._pp_exp_status.config(text="Stopped.", fg=TEXT_WARN)
+
+        self._start_thinking(on_stop=_on_stop)
         import threading
         threading.Thread(target=self._pp_skip_nest_scan_task, daemon=True).start()
 
@@ -4561,12 +5210,15 @@ class VFXExporterApp(tk.Tk):
                     trailer_found = pair
 
             def _apply():
-                if not self._pp_connected:
+                if not self._pp_connected or self._pp_ame_scan_cancel:
                     # RESET ALL ran while this background project scan was
                     # still in flight — self._pp_created_seqs was already
                     # emptied by that reset; don't silently repopulate it
                     # with a stale scan's results (surfaced live as phantom
-                    # chips appearing after Reset All with nothing connected).
+                    # chips appearing after Reset All with nothing
+                    # connected) — or STOP cancelled just this scan (see
+                    # _pp_ame_scan_cancel), already reverted synchronously,
+                    # so there's nothing further to do here either way.
                     return
                 for nm, s in found:
                     self._pp_created_seqs.append((nm, s, None))
@@ -4603,6 +5255,8 @@ class VFXExporterApp(tk.Tk):
                     _status("✓ Rescanned — no new FINAL_EP episodes or trailer found.", "#50e050")
             self.after(0, _apply)
         except Exception as e:
+            if self._pp_ame_scan_cancel:
+                return
             import traceback
             traceback.print_exc()
             self.after(0, self._stop_thinking)
@@ -4851,7 +5505,7 @@ class VFXExporterApp(tk.Tk):
         for t in range(track_idx_from, num_tracks):
             self._pp_set_track_muted(seq_obj, "audioTracks", t, muted)
 
-    def _pp_apply_variant_mute_state(self, sub, style, variant_key):
+    def _pp_apply_variant_mute_state(self, sub, style, variant_key, is_trailer=False):
         """Sets up the mute state for one export variant on an
         already-nested episode subsequence, right before it gets queued.
         Always starts from a clean, fully-unmuted baseline (every video
@@ -4866,11 +5520,13 @@ class VFXExporterApp(tk.Tk):
 
         Watermark is muted by default for every style/variant — LIVE,
         MARKETING, and SOCIAL MEDIA's "_SM" (social_muted) — only the
-        "_SM_WM" (social_unmuted) variant shows it. Checked unconditionally
-        (not just inside a SOCIAL MEDIA branch) since it's harmless when
-        the track doesn't exist on a regular episode (only the trailer
-        actually has one) — _pp_find_watermark_track just returns None
-        there and this is a no-op."""
+        "_SM_WM" (social_unmuted) variant shows it. Only the trailer is
+        ever expected to actually have this track — regular episodes
+        never carry a Watermark clip at all — so is_trailer gates the
+        whole check (an extra ExtendScript round trip per episode per
+        style pass otherwise) instead of running it unconditionally and
+        relying on _pp_find_watermark_track returning None as a no-op
+        for every regular episode, every single pass."""
         num_video = sub.videoTracks.numTracks
         num_audio = sub.audioTracks.numTracks
         if num_video > 0:
@@ -4884,10 +5540,11 @@ class VFXExporterApp(tk.Tk):
             lower_third_track = self._pp_find_lower_third_track(sub)
             if lower_third_track is not None:
                 self._pp_set_track_muted(sub, "videoTracks", lower_third_track, True)
+        if not is_trailer:
+            return
         watermark_track = self._pp_find_watermark_track(sub)
         if watermark_track is not None:
-            # Only the trailer is expected to actually have this track —
-            # logged so it's visible (not silent) whether it was found and
+            # Logged so it's visible (not silent) whether it was found and
             # which way it got set, since a wrong mute state here is easy
             # to miss until the render's already out.
             show_watermark = (style == "SOCIAL MEDIA" and variant_key == "social_unmuted")
@@ -4930,13 +5587,41 @@ class VFXExporterApp(tk.Tk):
             "SOCIAL MEDIA": (self.EXP_SM_BG, self.EXP_SM_OUTLINE, self.EXP_SM_TXT),
         }.get(style, (self.EXP_ACTIVE_BG, self.EXP_ACTIVE_OUTLINE, self.EXP_ACTIVE_TXT))
 
+    EXP_PROGRESS_DEFAULT = "#e0c040"
+
+    def _pp_set_exp_progress_color(self, style):
+        """Recolors the Phase 2 progress bar to match whichever style is
+        currently being queued — same outline color already used for that
+        style's export chips (_pp_exp_style_colors), so the bar and the
+        chips it's tracking read consistently: gold while queueing LIVE,
+        blue for MARKETING, purple for SOCIAL MEDIA."""
+        _, outline, _ = self._pp_exp_style_colors(style)
+        ttk.Style().configure("PPExp.Horizontal.TProgressbar", background=outline)
+
+    def _pp_reset_exp_progress_color(self):
+        ttk.Style().configure("PPExp.Horizontal.TProgressbar", background=self.EXP_PROGRESS_DEFAULT)
+
     def _pp_build_exp_chips(self):
         """Rebuilds every EXPORT QUEUE chip from self._pp_created_seqs +
         self._pp_exp_disabled/self._pp_exp_queued — mirrors the VFX tab's
         DETECTED EPISODES tag mechanics (toggle glyph, divider). Chips in
         self._pp_exp_queued were successfully queued in a prior run — they
         stay permanently "done" (solid blue) and non-interactive, even
-        after more episodes are nested and this rebuilds again."""
+        after more episodes are nested and this rebuilds again.
+
+        Sorted by episode number every time, in place, before rendering —
+        self._pp_created_seqs is appended to from more than one place (a
+        fresh nest run, and a Skip Nest/Rescan Episodes scan that discovers
+        already-nested episodes still sitting in the project), and each of
+        those just appends to whatever's already there. An episode
+        discovered later that numbers earlier than ones already in the
+        list would otherwise render after them — this keeps the visible
+        chip order (and the order episodes get queued to AME) chronological
+        regardless of nest/discovery order. TRAILER (no parseable episode
+        number) always sorts to the end, matching where it's meant to sit."""
+        self._pp_created_seqs.sort(
+            key=lambda e: self._pp_extract_ep_num(e[0])
+            if self._pp_extract_ep_num(e[0]) is not None else float("inf"))
         for w in list(self._pp_exp_chips_frame.winfo_children()):
             w.destroy()
         # A Frame with zero packed children won't shrink back down even
@@ -4950,7 +5635,12 @@ class VFXExporterApp(tk.Tk):
         label_font = tkfont.Font(family="SF Pro Display", size=10, weight="bold")
         th, r, gap, glyph_zone = 24, 6, 5, 23
         ch = th + 2
-        avail = max(self._pp_exp_chips_frame.winfo_width() - 16, 800)
+        # -6, not the -16 the other two chip-wrapping spots in this file
+        # use — that extra margin was leaving ~10px of genuinely unused
+        # space to the right of a full row's last chip here specifically.
+        # Reclaimed instead of just growing the window to cover it — see
+        # APP_WIDTH's comment for how this feeds into that number.
+        avail = max(self._pp_exp_chips_frame.winfo_width() - 6, 800)
         row = None
         row_used = 0
         for idx, (name, sub, reel_idx) in enumerate(self._pp_created_seqs):
@@ -5108,7 +5798,7 @@ class VFXExporterApp(tk.Tk):
         actively in flight (mutating self._pp_created_seqs mid-run would
         crash the background export thread), or a run that just finished
         completely (deliberate — requires a fresh scan/nest to unlock
-        again, not just Reset Export/Reset All). Not the same as
+        again, not just Reset Queue/Reset All). Not the same as
         _pp_exp_started, which stays True permanently from the first
         Queue Episodes click onward and drives the separate "⊘ lock" on
         excluded chips."""
@@ -5506,6 +6196,7 @@ class VFXExporterApp(tk.Tk):
                 name = self._pp_created_seqs[idx][0]
                 is_trailer = (idx == trailer_idx)
                 self.after(0, lambda i=idx, st=style: self._pp_set_exp_chip_active(i, st))
+                self.after(0, lambda st=style: self._pp_set_exp_progress_color(st))
 
                 # Refreshes the date in the name (Premiere sequence rename
                 # included) the first time this item is touched this run —
@@ -5514,10 +6205,18 @@ class VFXExporterApp(tk.Tk):
                     name = self._pp_apply_update_date(idx, name, sub, is_trailer)
                     renamed_this_run.add(idx)
 
-                self._pp_apply_variant_mute_state(sub, style, variant_key)
+                self._pp_apply_variant_mute_state(sub, style, variant_key, is_trailer=is_trailer)
                 out_dir = out_dirs["TRAILER"] if is_trailer else out_dirs[style]
-                _status(f"Queueing {name} → {style}{suffix} "
-                        f"(pass {p_i+1}/{len(passes)}) — {pos+1}/{total} — → {out_dir}", TEXT_MUTED)
+                # Leads with the style/version (LIVE, MARKETING, SOCIAL
+                # MEDIA) and the actual output filename — the previous
+                # "{style}{suffix}" mashup (e.g. "MARKETING_M") read like
+                # one garbled token instead of a version name next to a
+                # separate filename. No extension shown here since AME
+                # appends its own based on the preset's real output
+                # format (see the out_path comment below) — this is
+                # exactly what gets handed to encodeSequence().
+                _status(f"Queueing {style} — {name}{suffix} — {pos+1}/{total} → {out_dir}",
+                        TEXT_MUTED)
                 # No extension here — every preset used so far has actually
                 # produced .mp4, but AME appends its own extension based on
                 # the preset's real output format regardless of what we
@@ -5571,8 +6270,14 @@ class VFXExporterApp(tk.Tk):
                     queued_items_this_run += 1
                     self._pp_exp_queued.add(name)
                     self.after(0, lambda i=idx, st=style: self._pp_set_exp_chip_done(i, st))
-                    _status(f"Queued {name} — {style_label} "
-                            f"({queued_items_this_run}/{total_items} items)", TEXT_MUTED)
+                    # Names the style that JUST finished this item (not
+                    # style_label, every checked style combined) — this
+                    # fires once per item, right after whichever pass
+                    # was its last remaining one, so saying "LIVE +
+                    # MARKETING" here when only MARKETING just finished
+                    # was misleading about what actually just happened.
+                    _status(f"✓ Queued {name}{suffix} — {style} — "
+                            f"{queued_items_this_run}/{total_items} item(s) fully queued", TEXT_MUTED)
                 else:
                     # More styles still pending for this item — drop back
                     # to "waiting" (dimmed style color + lock) rather than
@@ -5645,6 +6350,7 @@ class VFXExporterApp(tk.Tk):
         self.btn_pp_export._text = "Queue Episodes"
         self.btn_pp_export._command = self._pp_run_export
         self._pp_exp_progress_var.set(0)
+        self._pp_reset_exp_progress_color()
         self._pp_exp_status.config(text="", fg=TEXT_MUTED)
         self._pp_build_exp_chips()
         self._pp_refresh_export_button()
@@ -5950,14 +6656,6 @@ class VFXExporterApp(tk.Tk):
             # Show Reset Export - already always visible
         self.after(0, _do)
 
-    def _hide_continue_buttons(self):
-        def _do():
-            # Restore Export button
-            self.btn_export._text = "Export"
-            self._set_btn_state(self.btn_export, False)
-            self.btn_export.unbind("<Button-1>")
-        self.after(0, _do)
-
     def _set_stop_button(self):
         """Set RESET ALL button to STOP state for export."""
         self.btn_reset._text = "STOP"
@@ -6168,10 +6866,18 @@ class VFXExporterApp(tk.Tk):
         # RESET ALL's enabled look is per-tab (see self._reset_armed) — make
         # sure the shared button reflects the tab we just switched TO, not
         # whatever tab last called _enable_reset_btn/_disable_reset_btn.
-        if self._reset_armed.get(tab_id):
-            self._enable_reset_btn()
-        else:
-            self._disable_reset_btn()
+        # Skipped entirely while a background operation (either tab —
+        # e.g. Episode Export's reel prescan) currently owns the button as
+        # STOP (_thinking_owns_reset_btn) — switching tabs mid-scan used
+        # to silently flip it back to a plain enabled/disabled RESET ALL,
+        # even though that operation was still genuinely running in the
+        # background; _stop_thinking() is what's supposed to hand it back,
+        # once the operation that's actually using it finishes.
+        if not getattr(self, "_thinking_owns_reset_btn", False):
+            if self._reset_armed.get(tab_id):
+                self._enable_reset_btn()
+            else:
+                self._disable_reset_btn()
         # Same per-tab treatment for the SHOWCODE pill.
         if hasattr(self, '_show_pill'):
             self._render_show_pill(self._show_pill_text.get(tab_id, ""))
@@ -6574,61 +7280,6 @@ class VFXExporterApp(tk.Tk):
         entry.bind("<FocusOut>", on_out)
         entry.bind("<KeyRelease>", on_key)
 
-    def _btn(self, parent, text, command, enabled=True, accent=False, small=False):
-        if accent and not enabled:
-            bg = "#5a4a1a"  # dark muted orange when disabled
-            fg = "#888888"
-        elif accent:
-            bg = ACCENT
-            fg = "#000000"
-        else:
-            bg = "#444444" if enabled else "#333333"
-            fg = "#FFFFFF" if enabled else "#555555"
-
-        btn = tk.Label(parent, text=text,
-                       font=("SF Pro Display", 11) if small else ("SF Pro Display", 13),
-                       bg=bg, fg=fg,
-                       padx=12 if small else 18, pady=5 if small else 9,
-                       cursor="" if enabled else "arrow")
-        if enabled:
-            def on_enter(e, b=btn, a=accent): b.config(bg=ACCENT_HOVER if a else "#555555")
-            def on_leave(e, b=btn, ob=bg): b.config(bg=ob)
-            def on_click(e, cmd=command): cmd()
-            btn.bind("<Enter>", on_enter)
-            btn.bind("<Leave>", on_leave)
-            btn.bind("<Button-1>", on_click)
-        btn._enabled = enabled
-        btn._bg = bg
-        btn._accent = accent
-        btn._command = command
-        return btn
-
-    def _on_naming_mode_change(self):
-        is_auto = self.naming_mode.get() == "auto"
-        if is_auto:
-            self.manual_frame.pack_forget()
-            self.hour_wrap.pack_forget()
-            self.hour_hint.pack_forget()
-            self.hour_display.pack(side="left")
-            # Disable ref video section in auto mode
-            self.ref_video_frame.config(
-                highlightbackground="#222222")
-            for w in self.ref_video_widgets:
-                try: w.config(state="disabled")
-                except: pass
-        else:
-            self.manual_frame.pack(fill="x")
-            self.hour_display.pack_forget()
-            self.hour_wrap.pack(side="left")
-            self.hour_hint.pack(side="left", padx=(8, 0))
-            # Enable ref video section in manual mode
-            self.ref_video_frame.config(
-                highlightbackground=BORDER)
-            for w in self.ref_video_widgets:
-                try: w.config(state="normal")
-                except: pass
-        self._update_filename_preview()
-
     def _update_filename_preview(self):
         code = self.show_code.get().strip()
         acronym = self.show_acronym.get().strip()
@@ -6647,23 +7298,28 @@ class VFXExporterApp(tk.Tk):
         else:
             self._log("All dependencies OK. Ready to connect.", "success")
 
-    def _validate_show_fields(self):
-        if not self.show_code.get().strip():
-            messagebox.showerror("Missing Info", "Please enter a Show Code.")
-            return False
-        if not self.show_acronym.get().strip():
-            messagebox.showerror("Missing Info", "Please enter a Show Acronym.")
-            return False
-        if not self.export_date.get().strip():
-            messagebox.showerror("Missing Info", "Please enter an Export Date.")
-            return False
-        return True
-
     def _stop_scan_now(self):
         self._stop_scan = True
         self._log("⚠ Stopping scan after current frame...", "warn")
 
-    def _start_thinking(self, manage_reset_btn=True):
+    def _rebind_stop_handler(self, on_stop):
+        """(Re)binds the shared RESET ALL/STOP button's release handler to
+        the given on_stop — factored out of _start_thinking() so a
+        chained/nested _start_thinking() call (thinking already active)
+        can move the live handler onto ITS OWN on_stop instead of leaving
+        it pinned to whichever task happened to start first. Only rebinds
+        <ButtonRelease-1> — the hover/press color bindings are generic
+        and already correct once the button is in its STOP look."""
+        def _on_generic_stop(e, _cb=on_stop):
+            self.btn_reset.unbind("<Enter>")
+            self.btn_reset.unbind("<Leave>")
+            self.btn_reset.unbind("<ButtonPress-1>")
+            self.btn_reset.unbind("<ButtonRelease-1>")
+            self.btn_reset._draw("#6e1a1a")
+            (_cb or self._do_reset)()
+        self.btn_reset.bind("<ButtonRelease-1>", _on_generic_stop)
+
+    def _start_thinking(self, manage_reset_btn=True, on_stop=None):
         """Start GIF animation. Also takes RESET ALL over into a STOP
         button for the duration, for any task that doesn't already manage
         that transition itself — nest/export/VFX-scan wire their own
@@ -6672,14 +7328,50 @@ class VFXExporterApp(tk.Tk):
         manage_reset_btn=False so this doesn't stomp on that.
 
         Every other "thinking" task here (Connect to Premiere's scan,
-        Skip Nest's project scan, manual track re-pick, arming
-        a timeline) has no such per-task stop flag, and clicking STOP for
-        those just runs the normal Reset All action directly — safe
-        because each of them already checks self._pp_connected (or
-        _pp_skip_nest_mode) before touching shared state on completion,
-        so a reset landing mid-task is a clean no-op for whatever's still
-        in flight, not a race."""
+        Connect to DaVinci, Skip Nest's project scan/Connect to AME,
+        manual track re-pick, arming a timeline, the reel prescan) passes
+        its own on_stop callback instead — a lightweight, task-specific
+        cancel-and-revert (set a cancel flag the background thread checks
+        before applying its eventual result, and immediately restore
+        whatever UI that task had already speculatively changed, e.g. the
+        dropdown's "SCANNING" placeholder) instead of the old behavior of
+        just calling _do_reset() and wiping the whole tab. Falls back to
+        _do_reset() if a caller doesn't pass one — kept as the safe
+        default rather than a silent no-op, but every call site in this
+        file now passes its own.
+
+        _thinking_active/_thinking_owns_reset_btn are shared across BOTH
+        tabs (one physical spinner, one physical RESET ALL button) — a
+        plain reentrancy guard used to mean a second, genuinely unrelated
+        operation starting while the first is still in flight (e.g.
+        clicking Connect to DaVinci on the VFX tab while the Episode
+        Export tab's reel prescan is still running in the background) was
+        a total no-op, and that second operation's own _stop_thinking()
+        would then tear down the FIRST operation's spinner/STOP button
+        the moment IT finished — even though the first was still working.
+        _thinking_depth turns this into a simple reentrant counter instead:
+        every _start_thinking() call counts, and the shared UI only
+        actually resets once every matching _stop_thinking() has landed.
+        RESET ALL/Reset Nest force this back to 0 as a safety valve, in
+        case some call path somewhere doesn't perfectly pair up."""
+        self._thinking_depth = getattr(self, "_thinking_depth", 0) + 1
         if self._thinking_active:
+            # A nested/chained task started while another is still in
+            # flight — e.g. Connect to Premiere's own scan handing off
+            # straight to the eager reel prescan right after, on the
+            # same tab. The spinner/STOP visuals are already up, so no
+            # redraw needed, but the STOP button's bound handler still
+            # needs to move onto THIS call's on_stop: whatever most
+            # recently started is what's actually running right now,
+            # and is what STOP should interrupt. Previously this just
+            # returned, leaving STOP bound to the FIRST caller's
+            # on_stop for the whole rest of the chain — clicking STOP
+            # during the reel prescan (after Connect to Premiere's own
+            # scan had already returned) silently did nothing useful,
+            # since the bound handler was still Connect's own on_stop,
+            # which has no idea how to abort a prescan.
+            if self._thinking_owns_reset_btn and on_stop is not None:
+                self._rebind_stop_handler(on_stop)
             return
         self._thinking_active = True
         self._thinking_frame_idx = 0
@@ -6696,14 +7388,7 @@ class VFXExporterApp(tk.Tk):
             self.btn_reset.bind("<Enter>", lambda e: self.btn_reset._draw("#ae3a3a"))
             self.btn_reset.bind("<Leave>", lambda e: self.btn_reset._draw("#8e2a2a"))
             self.btn_reset.bind("<ButtonPress-1>", lambda e: self.btn_reset._draw("#6e1a1a"))
-            def _on_generic_stop(e):
-                self.btn_reset.unbind("<Enter>")
-                self.btn_reset.unbind("<Leave>")
-                self.btn_reset.unbind("<ButtonPress-1>")
-                self.btn_reset.unbind("<ButtonRelease-1>")
-                self.btn_reset._draw("#6e1a1a")
-                self._do_reset()
-            self.btn_reset.bind("<ButtonRelease-1>", _on_generic_stop)
+            self._rebind_stop_handler(on_stop)
         if self._thinking_frames:
             self._animate_gif()
         else:
@@ -6714,7 +7399,17 @@ class VFXExporterApp(tk.Tk):
         """Stop GIF animation and hide. Restores RESET ALL if
         _start_thinking's generic path was the one that took it over (see
         there) — leaves it alone otherwise, since nest/export/VFX-scan
-        restore it themselves as part of their own completion handling."""
+        restore it themselves as part of their own completion handling.
+
+        Paired with _start_thinking's _thinking_depth counter — if some
+        OTHER operation's _start_thinking() is still outstanding (e.g. the
+        VFX tab's Connect finished while the Episode Export tab's reel
+        prescan is still running), this decrements the shared counter but
+        leaves the actual spinner/STOP button alone rather than tearing it
+        down out from under that still-running operation."""
+        self._thinking_depth = max(0, getattr(self, "_thinking_depth", 1) - 1)
+        if self._thinking_depth > 0:
+            return
         self._thinking_active = False
         if hasattr(self, '_thinking_label'):
             self.after(0, lambda: self._thinking_label.config(image="", text=""))
@@ -7214,10 +7909,6 @@ class VFXExporterApp(tk.Tk):
                      anchor="w", padx=10, pady=6, wraplength=440, justify="left"
                      ).pack(fill="x", pady=(2, 6))
 
-        def _chip(parent, text, bg, fg):
-            return tk.Label(parent, text=text, font=("SF Pro Display", 9, "bold"),
-                            bg=bg, fg=fg, padx=6, pady=1)
-
         # ── PREPARING CLIPS ──────────────────────────────────────────────────
         sec = sections["clips"]
         _section_hdr(sec, "CLIP COLORS")
@@ -7288,9 +7979,11 @@ class VFXExporterApp(tk.Tk):
         # ── OUTPUT FOLDER ─────────────────────────────────────────────────────
         sec = sections["output"]
         _section_hdr(sec, "FOLDER STRUCTURE")
-        _step(sec, 1, "Drive structure",
-              "The app scans mounted volumes for this structure:")
-        _code(sec, "/Volumes/SHOWCODE_*/SHOWCODE_*_EDIT/\n\u2192 folder with 'TURNOVER' in name\n\u2192 folder with 'TO VFX' in name")
+        _step(sec, 1, "Volume & folder match",
+              "The app scans any mounted volume whose name contains your "
+              "show code, then looks inside it (up to 6 folders deep) for "
+              "the first folder with 'TO VFX' in its name:")
+        _code(sec, "/Volumes/*SHOWCODE*/\n\u2192 ... (any depth, up to 6)\n\u2192 folder with 'TO VFX' in name")
         _step(sec, 2, "What gets created",
               "Inside TO VFX, the app creates one subfolder per episode plus a "
               "LIST TO POST folder containing the .xlsx document and screenshots.")
@@ -7371,11 +8064,12 @@ class VFXExporterApp(tk.Tk):
         _step(sec, 5, "Re-nesting an existing episode",
               "If the episode number you're about to nest already exists "
               "in the project's DELIVERY > FINAL bin, the app asks whether "
-              "to overwrite it before proceeding. Choosing \"Overwrite\" "
-              "deletes the existing sequence and replaces it with the "
-              "newly nested one. Choosing \"No\" leaves the existing "
-              "sequence untouched — its episode tag in EPISODES NESTED is "
-              "marked done instead.")
+              "to overwrite it. \"Yes\" replaces it with the newly nested "
+              "one; \"No\" leaves it untouched and marks its tag done "
+              "instead. \"Cancel\" stops the whole nest run, not just this "
+              "episode. Under \"Nest All\", check \"Apply to all reels\" "
+              "before answering to reuse that choice for every later "
+              "collision in this run instead of being asked each time.")
         _tip(sec, "Use \"Reset Nest\" to start the current reel over from "
                   "scratch. If you already nested outside of this session, "
                   "use \"Skip Nest\" instead — \"Connect to AME\" will scan "
@@ -7437,6 +8131,9 @@ class VFXExporterApp(tk.Tk):
               "you're ready.")
         _tip(sec, "Tip: hitting STOP mid-queue pauses it — the button becomes "
                   "\"Continue Queueing\" and picks up where it left off.")
+        _tip(sec, "Tip: the progress bar changes color to match whichever "
+                  "style is currently queueing — gold for LIVE, blue for "
+                  "MARKETING, purple for SOCIAL MEDIA.")
 
         # Show first tab
         _show_tab("clips")
@@ -7457,6 +8154,19 @@ class VFXExporterApp(tk.Tk):
         if not hasattr(self, 'btn_reset'):
             return
         self._reset_armed[self._active_tab] = True
+        if getattr(self, "_thinking_owns_reset_btn", False):
+            # A running task currently owns this button as STOP (see
+            # _start_thinking) — every caller of _enable_reset_btn()
+            # ("something changed, arm the reset button") used to
+            # unconditionally overwrite the button's text/click-binding
+            # back to RESET ALL regardless of that, silently killing the
+            # STOP takeover out from under a still-running task (seen
+            # live: switching Title Card Track mode mid-scan flipped
+            # STOP back to RESET ALL even though the scan kept running).
+            # _reset_armed above still gets set so the correct RESET ALL
+            # state is there once _stop_thinking()/_restore_reset_btn
+            # actually hands the button back.
+            return
         self.btn_reset._text = "RESET ALL"
         self.btn_reset._bg = "#2a6e2a"
         self.btn_reset._draw("#2a6e2a")
@@ -7504,6 +8214,13 @@ class VFXExporterApp(tk.Tk):
         """Reset the currently active tab back to its initial state. RESET
         ALL is scoped to whichever tab you're on — resetting the Episode
         Export tab doesn't touch VFX progress and vice versa."""
+        # Safety valve for _thinking_depth (see _start_thinking/
+        # _stop_thinking) — a genuine "give up and start over" click
+        # should always be able to clear the shared spinner/STOP state
+        # outright, even if some call path somewhere left the counter
+        # imperfectly paired.
+        self._thinking_depth = 0
+        self._thinking_active = False
         self.after(0, self._disable_reset_btn)
         if hasattr(self, '_show_pill'):
             self._update_show_pill("")
@@ -7601,13 +8318,23 @@ class VFXExporterApp(tk.Tk):
         self._enable_reset_btn()
         self._set_btn_state(self.btn_connect, False)
         self.after(0, lambda: self._connect_status.config(text="Connecting..."))
-        # RESET ALL becomes STOP for the duration (generic path — clicking
-        # it just runs a normal reset directly, same as Skip Nest's project
-        # scan/etc.). Safe here specifically because of the
-        # my_engine identity check below: a reset landing mid-connect sets
-        # self.engine back to None, so this task's own results get quietly
-        # discarded instead of overwriting the reset once connect() returns.
-        self._start_thinking()
+
+        def _on_stop():
+            # connect() below is a single blocking call with no mid-flight
+            # checkpoint to interrupt, so this can't truly abort it — but
+            # it reuses the identity check the task already does once
+            # connect() eventually returns (self.engine is my_engine?):
+            # setting self.engine to None here makes that check fail the
+            # same way it already does after a RESET ALL landed mid-connect,
+            # so the stale result gets discarded there instead of applied,
+            # calling _stop_thinking() itself once that happens — this
+            # just handles the immediate, visible part (button/status)
+            # right away instead of waiting for the connect call to return.
+            self.engine = None
+            self.after(0, lambda: self._connect_status.config(text=""))
+            self._set_btn_state(self.btn_connect, True)
+
+        self._start_thinking(on_stop=_on_stop)
         def task():
             try:
                 self._set_step_active(0)
@@ -7677,13 +8404,15 @@ class VFXExporterApp(tk.Tk):
                     if self.out_mode.get() == "auto":
                         found = find_output_folder(
                             info.get("show_code", ""),
-                            info.get("show_acronym", "")
+                            info.get("show_acronym", ""),
+                            log_callback=lambda m: self._log(m, "muted")
                         )
                         if found:
                             self.output_dir.set(found)
                             self._log(f"Output folder: {found}", "success")
                         else:
-                            self._log("Output folder not found — switched to Manual. Please browse to your TO VFX folder.", "warn")
+                            self._log("Output folder not found — switched to Manual. Please browse to your TO VFX folder. "
+                                       "See the lines above for exactly which volumes/folders were checked.", "warn")
                             self.after(0, lambda: self.out_mode.set("manual"))
                             self.after(0, self._on_out_mode_change)
                             self.after(0, lambda: self.output_dir.set(""))
@@ -7897,9 +8626,6 @@ class VFXExporterApp(tk.Tk):
                 self._log(msg, "muted")
         self.after(0, _do)
 
-    def _set_progress(self, pct):
-        self.after(0, lambda: self.progress_var.set(pct))
-
     def _update_episode_list(self):
         def _do():
             for w in self._ep_tag_widgets:
@@ -8014,60 +8740,42 @@ class VFXExporterApp(tk.Tk):
         self.plates_count_label.config(text=str(count))
 
     def _set_btn_state(self, btn, enabled):
+        """Every button in this app is a _rounded_btn-drawn tk.Canvas —
+        the plain tk.Label button constructor (_btn) this used to also
+        support was removed as dead code, so this only ever needs the
+        canvas-button path now."""
         def _do():
             btn._enabled = enabled
-            if isinstance(btn, tk.Canvas):
-                # Rounded canvas button
-                danger = getattr(btn, "_danger", False)
-                if enabled:
-                    bg = ACCENT if btn._accent else ("#8e2a2a" if danger else "#444444")
-                    fg = "#000000" if btn._accent else "#FFFFFF"
-                else:
-                    bg = "#5a4a1a" if btn._accent else "#333333"
-                    fg = "#888888" if btn._accent else "#555555"
-                btn._bg = bg
-                btn._fg = fg
-                btn._draw(bg, fg)
-                btn.config(cursor="" if enabled else "arrow")
-                btn.unbind("<Enter>")
-                btn.unbind("<Leave>")
-                # These canvas buttons are bound via <ButtonPress-1>/
-                # <ButtonRelease-1> (see _rounded_btn), never the generic
-                # <Button-1> — unbinding that was a no-op, leaving a
-                # previously-enabled button's old <ButtonRelease-1> (which
-                # calls _command()) live underneath the greyed-out visual.
-                btn.unbind("<ButtonPress-1>")
-                btn.unbind("<ButtonRelease-1>")
-                if enabled:
-                    hover = ACCENT_HOVER if btn._accent else ("#ae3a3a" if danger else "#555555")
-                    press = "#c07010" if btn._accent else ("#6e1a1a" if danger else "#666666")
-                    btn.bind("<Enter>", lambda e, b=btn, h=hover, f=fg: b._draw(h, f))
-                    btn.bind("<Leave>", lambda e, b=btn, f=fg: b._draw(b._bg, f))
-                    btn.bind("<ButtonPress-1>", lambda e, b=btn, p=press, f=fg: b._draw(p, f))
-                    def _on_release(e, b=btn, f=fg):
-                        b._draw(b._bg, f)
-                        b._command()
-                    btn.bind("<ButtonRelease-1>", _on_release)
+            danger = getattr(btn, "_danger", False)
+            if enabled:
+                bg = ACCENT if btn._accent else ("#8e2a2a" if danger else "#444444")
+                fg = "#000000" if btn._accent else "#FFFFFF"
             else:
-                # Legacy Label button
-                if enabled:
-                    bg = ACCENT if btn._accent else "#444444"
-                    fg = "#000000" if btn._accent else "#FFFFFF"
-                    btn._bg = bg
-                    btn.config(bg=bg, fg=fg, cursor="")
-                    def on_enter(e, b=btn): b.config(bg=ACCENT_HOVER if b._accent else "#555555")
-                    def on_leave(e, b=btn): b.config(bg=b._bg)
-                    def on_click(e, b=btn): b._command()
-                    btn.bind("<Enter>", on_enter)
-                    btn.bind("<Leave>", on_leave)
-                    btn.bind("<Button-1>", on_click)
-                else:
-                    bg = "#5a4a1a" if btn._accent else "#333333"
-                    fg = "#888888" if btn._accent else "#555555"
-                    btn.config(bg=bg, fg=fg, cursor="arrow")
-                    btn.unbind("<Button-1>")
-                    btn.unbind("<Enter>")
-                    btn.unbind("<Leave>")
+                bg = "#5a4a1a" if btn._accent else "#333333"
+                fg = "#888888" if btn._accent else "#555555"
+            btn._bg = bg
+            btn._fg = fg
+            btn._draw(bg, fg)
+            btn.config(cursor="" if enabled else "arrow")
+            btn.unbind("<Enter>")
+            btn.unbind("<Leave>")
+            # These canvas buttons are bound via <ButtonPress-1>/
+            # <ButtonRelease-1> (see _rounded_btn), never the generic
+            # <Button-1> — unbinding that was a no-op, leaving a
+            # previously-enabled button's old <ButtonRelease-1> (which
+            # calls _command()) live underneath the greyed-out visual.
+            btn.unbind("<ButtonPress-1>")
+            btn.unbind("<ButtonRelease-1>")
+            if enabled:
+                hover = ACCENT_HOVER if btn._accent else ("#ae3a3a" if danger else "#555555")
+                press = "#c07010" if btn._accent else ("#6e1a1a" if danger else "#666666")
+                btn.bind("<Enter>", lambda e, b=btn, h=hover, f=fg: b._draw(h, f))
+                btn.bind("<Leave>", lambda e, b=btn, f=fg: b._draw(b._bg, f))
+                btn.bind("<ButtonPress-1>", lambda e, b=btn, p=press, f=fg: b._draw(p, f))
+                def _on_release(e, b=btn, f=fg):
+                    b._draw(b._bg, f)
+                    b._command()
+                btn.bind("<ButtonRelease-1>", _on_release)
         self.after(0, _do)
 
 
