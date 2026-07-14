@@ -185,7 +185,58 @@ class InstallerApp(tk.Tk):
         self._set_status("Installing...")
         threading.Thread(target=self._install, daemon=True).start()
 
+    def _ensure_sudo_authenticated(self, env):
+        """Lazily authenticates sudo ONCE (via a GUI password prompt,
+        since this process has no real terminal for sudo to prompt on
+        directly) and starts a background keepalive that silently
+        refreshes that authorization every 60s for the rest of the
+        install. Every privileged step below (Python 3.13, Xcode CLT,
+        Homebrew) calls this before doing anything that needs sudo —
+        it's idempotent, so only the very first call actually prompts;
+        every later call just confirms the existing authorization is
+        still being kept warm and returns immediately. This is what
+        makes the whole install a single password prompt instead of
+        one per privileged step.
+
+        Returns True if sudo is authenticated and usable, False if the
+        user failed to authenticate (wrong password, cancelled, etc).
+        """
+        if getattr(self, "_sudo_authenticated", False):
+            return True
+        askpass_script = os.path.join(tempfile.gettempdir(), "ft_sudo_askpass.sh")
+        with open(askpass_script, "w") as f:
+            f.write(
+                "#!/bin/bash\n"
+                "osascript -e 'display dialog "
+                "\"Finishing Tool needs your password to continue "
+                "installing:\" default answer \"\" with hidden answer "
+                "with title \"Finishing Tool Installer\" buttons {\"OK\"} "
+                "default button \"OK\"' "
+                "-e 'text returned of result' 2>/dev/null\n"
+            )
+        os.chmod(askpass_script, 0o755)
+        self._sudo_env = env.copy()
+        self._sudo_env["SUDO_ASKPASS"] = askpass_script
+        try:
+            r = subprocess.run(["sudo", "-A", "-v"], env=self._sudo_env,
+                               capture_output=True, text=True, timeout=120)
+            if r.returncode != 0:
+                self._log(f"⚠ Password authentication failed: {r.stderr.strip()}")
+                return False
+        except subprocess.TimeoutExpired:
+            self._log("⚠ Password prompt timed out.")
+            return False
+        keepalive_script = os.path.join(tempfile.gettempdir(), "ft_sudo_keepalive.sh")
+        with open(keepalive_script, "w") as f:
+            f.write("#!/bin/bash\nwhile true; do sudo -n -v; sleep 60; done\n")
+        os.chmod(keepalive_script, 0o755)
+        self._sudo_keepalive_proc = subprocess.Popen([keepalive_script], env=self._sudo_env)
+        self._sudo_authenticated = True
+        return True
+
     def _install(self):
+        self._sudo_authenticated = False
+        self._sudo_keepalive_proc = None
         try:
             total = len(STEPS)
             env = os.environ.copy()
@@ -233,10 +284,11 @@ class InstallerApp(tk.Tk):
                     with open(py_pkg, "wb") as f:
                         f.write(req.read())
                     self._log("  Installing Python 3.13 (requires admin)...")
-                    install_py = (f'do shell script "installer -pkg \\"{py_pkg}\\" -target /" '
-                                  f'with administrator privileges')
-                    r = subprocess.run(["osascript", "-e", install_py],
-                                       capture_output=True, text=True, timeout=300)
+                    if not self._ensure_sudo_authenticated(env):
+                        self._set_status("Authentication failed — check log.")
+                        return
+                    r = subprocess.run(["sudo", "-A", "installer", "-pkg", py_pkg, "-target", "/"],
+                                       env=self._sudo_env, capture_output=True, text=True, timeout=300)
                     if r.returncode != 0 or not os.path.exists(python):
                         self._log(f"  ✗ Python install failed: {r.stderr.strip()}")
                         self._set_status("Python 3.13 install failed — check log.")
@@ -284,19 +336,22 @@ class InstallerApp(tk.Tk):
                         "rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress\n"
                     )
                 os.chmod(clt_script, 0o755)
-                apple_script = (f'do shell script "{clt_script}" '
-                                f'with administrator privileges')
-                try:
-                    r = subprocess.run(["osascript", "-e", apple_script],
-                                       capture_output=True, text=True, timeout=900)
-                    if os.path.exists("/Library/Developer/CommandLineTools"):
-                        self._log("Xcode Command Line Tools installed ✓")
-                    else:
-                        self._log(f"⚠ CLT install may not have finished: {r.stderr.strip()} "
-                                  f"— continuing anyway.")
-                except subprocess.TimeoutExpired:
-                    self._log("⚠ Xcode Command Line Tools install timed out after 15 "
-                              "minutes — continuing anyway.")
+                if not self._ensure_sudo_authenticated(env):
+                    self._log("⚠ Could not authenticate for Xcode Command Line Tools "
+                              "install — continuing anyway.")
+                else:
+                    try:
+                        r = subprocess.run(["sudo", "-A", "bash", clt_script],
+                                           env=self._sudo_env, capture_output=True,
+                                           text=True, timeout=900)
+                        if os.path.exists("/Library/Developer/CommandLineTools"):
+                            self._log("Xcode Command Line Tools installed ✓")
+                        else:
+                            self._log(f"⚠ CLT install may not have finished: {r.stderr.strip()} "
+                                      f"— continuing anyway.")
+                    except subprocess.TimeoutExpired:
+                        self._log("⚠ Xcode Command Line Tools install timed out after 15 "
+                                  "minutes — continuing anyway.")
             else:
                 self._log("Xcode Command Line Tools found ✓")
 
@@ -322,55 +377,23 @@ class InstallerApp(tk.Tk):
                 # for SEVERAL of its own internal steps (prefix, cache, and
                 # repository directories, not just one) — verified by
                 # reading Homebrew's actual current install.sh, not
-                # assumed. With NONINTERACTIVE=1 alone, Homebrew runs
-                # `sudo -n` internally (never prompts, fails immediately
-                # if there's no already-cached authorization) — and this
-                # subprocess has no terminal and no prior sudo session, so
-                # that check fails every time regardless of whether the
-                # account is really an admin, producing the misleading
-                # "needs to be an Administrator" message. The fix Homebrew
-                # itself supports for exactly this: SUDO_ASKPASS. Homebrew
-                # checks for it and switches its internal `sudo` calls
-                # from `-n` (fail silently) to `-A` (prompt via this
-                # script) — pointed at a small script that pops a native
-                # macOS password dialog.
-                askpass_script = os.path.join(tempfile.gettempdir(), "ft_sudo_askpass.sh")
-                with open(askpass_script, "w") as f:
-                    f.write(
-                        "#!/bin/bash\n"
-                        "osascript -e 'display dialog "
-                        "\"Finishing Tool needs your password to finish "
-                        "installing Homebrew:\" default answer \"\" "
-                        "with hidden answer with title "
-                        "\"Finishing Tool Installer\" buttons {\"OK\"} "
-                        "default button \"OK\"' "
-                        "-e 'text returned of result' 2>/dev/null\n"
-                    )
-                os.chmod(askpass_script, 0o755)
-
-                brew_env = env.copy()
-                brew_env["SUDO_ASKPASS"] = askpass_script
+                # assumed. It finds sudo access via SUDO_ASKPASS, same as
+                # Python 3.13/Xcode CLT above — _ensure_sudo_authenticated
+                # is idempotent, so if either of those already prompted
+                # this run, this reuses that same authorization instead of
+                # prompting a third time.
+                if not self._ensure_sudo_authenticated(env):
+                    self._log("Homebrew install failed: could not authenticate.")
+                    self._set_step(0, "error")
+                    self._set_status("Authentication failed — check log.")
+                    return
+                brew_env = self._sudo_env.copy()
                 brew_env["NONINTERACTIVE"] = "1"
 
                 brew_script = os.path.join(tempfile.gettempdir(), "ft_install_brew.sh")
                 with open(brew_script, "w") as f:
                     f.write(
                         "#!/bin/bash\n"
-                        # Homebrew's script makes several SEPARATE internal
-                        # sudo calls (prefix, cache, repository dirs, etc.),
-                        # each via SUDO_ASKPASS. Without a real terminal
-                        # session, macOS doesn't reliably carry the
-                        # authorization from one sudo call to the next, so
-                        # each one would otherwise re-prompt independently.
-                        # Standard fix: authenticate once up front, then
-                        # keep that authorization alive in the background
-                        # (a periodic no-op `sudo -n -v` touch) for the
-                        # rest of the install so every later sudo call
-                        # reuses it instead of asking again.
-                        "sudo -A -v\n"
-                        "( while true; do sudo -n -v; sleep 60; done ) &\n"
-                        "KEEPALIVE_PID=$!\n"
-                        'trap "kill $KEEPALIVE_PID 2>/dev/null" EXIT\n'
                         # Must be run via `bash -c "<script text>"` — a bare
                         # `"$(curl ...)"` on its own line treats the ENTIRE
                         # downloaded script as a single command/path to
@@ -549,6 +572,13 @@ class InstallerApp(tk.Tk):
         except Exception as e:
             self._log(f"Error: {e}")
             self._set_status(f"Installation failed: {e}")
+        finally:
+            # Stop the sudo keepalive loop (if it was ever started) no
+            # matter how _install() exits — success, an early return, or
+            # an exception — so it doesn't linger as an orphaned
+            # background process after the installer is done.
+            if getattr(self, "_sudo_keepalive_proc", None) is not None:
+                self._sudo_keepalive_proc.kill()
 
     def _show_done(self):
         self._install_btn.place_forget()
