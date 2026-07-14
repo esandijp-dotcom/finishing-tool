@@ -185,58 +185,7 @@ class InstallerApp(tk.Tk):
         self._set_status("Installing...")
         threading.Thread(target=self._install, daemon=True).start()
 
-    def _ensure_sudo_authenticated(self, env):
-        """Lazily authenticates sudo ONCE (via a GUI password prompt,
-        since this process has no real terminal for sudo to prompt on
-        directly) and starts a background keepalive that silently
-        refreshes that authorization every 60s for the rest of the
-        install. Every privileged step below (Python 3.13, Xcode CLT,
-        Homebrew) calls this before doing anything that needs sudo —
-        it's idempotent, so only the very first call actually prompts;
-        every later call just confirms the existing authorization is
-        still being kept warm and returns immediately. This is what
-        makes the whole install a single password prompt instead of
-        one per privileged step.
-
-        Returns True if sudo is authenticated and usable, False if the
-        user failed to authenticate (wrong password, cancelled, etc).
-        """
-        if getattr(self, "_sudo_authenticated", False):
-            return True
-        askpass_script = os.path.join(tempfile.gettempdir(), "ft_sudo_askpass.sh")
-        with open(askpass_script, "w") as f:
-            f.write(
-                "#!/bin/bash\n"
-                "osascript -e 'display dialog "
-                "\"Finishing Tool needs your password to continue "
-                "installing:\" default answer \"\" with hidden answer "
-                "with title \"Finishing Tool Installer\" buttons {\"OK\"} "
-                "default button \"OK\"' "
-                "-e 'text returned of result' 2>/dev/null\n"
-            )
-        os.chmod(askpass_script, 0o755)
-        self._sudo_env = env.copy()
-        self._sudo_env["SUDO_ASKPASS"] = askpass_script
-        try:
-            r = subprocess.run(["sudo", "-A", "-v"], env=self._sudo_env,
-                               capture_output=True, text=True, timeout=120)
-            if r.returncode != 0:
-                self._log(f"⚠ Password authentication failed: {r.stderr.strip()}")
-                return False
-        except subprocess.TimeoutExpired:
-            self._log("⚠ Password prompt timed out.")
-            return False
-        keepalive_script = os.path.join(tempfile.gettempdir(), "ft_sudo_keepalive.sh")
-        with open(keepalive_script, "w") as f:
-            f.write("#!/bin/bash\nwhile true; do sudo -n -v; sleep 60; done\n")
-        os.chmod(keepalive_script, 0o755)
-        self._sudo_keepalive_proc = subprocess.Popen([keepalive_script], env=self._sudo_env)
-        self._sudo_authenticated = True
-        return True
-
     def _install(self):
-        self._sudo_authenticated = False
-        self._sudo_keepalive_proc = None
         try:
             total = len(STEPS)
             env = os.environ.copy()
@@ -259,201 +208,163 @@ class InstallerApp(tk.Tk):
             env["USER"] = current_user
             env["LOGNAME"] = current_user
 
-            # Pre-flight: Python 3.13
+            # Pre-flight: Python 3.13, Xcode CLT, Homebrew — all three
+            # installed sequentially inside ONE bash script (not as
+            # separate Python-spawned subprocess calls each doing their
+            # own "sudo -A"). Earlier versions authenticated separately
+            # per step (or tried to share one authorization across
+            # separately-spawned subprocess calls via a background
+            # keepalive) and still re-prompted — relying on macOS's sudo
+            # ticket cache to persist ACROSS separate process invocations
+            # with no controlling terminal turned out to be unreliable.
+            # A single continuous script making sequential `sudo -A`
+            # calls is unambiguous: that's the same process re-invoking
+            # sudo, not separate ones hoping to share a cached ticket.
             python = "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3"
-            if not os.path.exists(python):
-                self._log("Python 3.13 not found — downloading and installing...")
-                self._set_status("Installing Python 3.13 (this may take a minute)...")
-                # tempfile is already imported at module level (line 6) —
-                # do NOT re-import it locally here. Python scopes a name as
-                # local to the whole function the moment it's imported
-                # anywhere inside it, even conditionally, which would
-                # shadow the module-level import for the rest of _install()
-                # and break every other tempfile.* call below whenever this
-                # branch (Python 3.13 already installed) is skipped.
-                import urllib.request, ssl
-                ctx_py = ssl.create_default_context()
-                ctx_py.check_hostname = False
-                ctx_py.verify_mode = ssl.CERT_NONE
-                py_pkg_url = ("https://www.python.org/ftp/python/3.13.0/"
-                              "python-3.13.0-macos11.pkg")
-                py_pkg = os.path.join(tempfile.gettempdir(), "python-3.13.0.pkg")
-                try:
-                    self._log("  Downloading Python 3.13 installer (~45MB)...")
-                    req = urllib.request.urlopen(py_pkg_url, context=ctx_py, timeout=120)
-                    with open(py_pkg, "wb") as f:
-                        f.write(req.read())
-                    self._log("  Installing Python 3.13 (requires admin)...")
-                    if not self._ensure_sudo_authenticated(env):
-                        self._set_status("Authentication failed — check log.")
-                        return
-                    r = subprocess.run(["sudo", "-A", "installer", "-pkg", py_pkg, "-target", "/"],
-                                       env=self._sudo_env, capture_output=True, text=True, timeout=300)
-                    if r.returncode != 0 or not os.path.exists(python):
-                        self._log(f"  ✗ Python install failed: {r.stderr.strip()}")
-                        self._set_status("Python 3.13 install failed — check log.")
-                        return
-                    self._log("Python 3.13 installed ✓")
-                except Exception as e:
-                    self._log(f"  ✗ Could not install Python 3.13: {e}")
-                    self._set_status("Python 3.13 install failed — check log.")
-                    return
-            else:
-                self._log("Python 3.13 found ✓")
+            need_python = not os.path.exists(python)
+            xcode_check = subprocess.run(["xcode-select", "-p"], capture_output=True,
+                                         text=True, env=env)
+            need_clt = xcode_check.returncode != 0
+            brew = ("/opt/homebrew/bin/brew" if os.path.exists("/opt/homebrew/bin/brew")
+                    else "/usr/local/bin/brew" if os.path.exists("/usr/local/bin/brew")
+                    else shutil.which("brew"))
+            need_brew = not brew or not os.path.exists(brew)
 
-            # Pre-flight: Xcode Command Line Tools. None of this app's own
-            # pip packages need a compiler (verified — they're all prebuilt
-            # wheels or pure Python), but Homebrew's own installer needs
-            # CLT for git, so this is a real transitive requirement via the
-            # Homebrew step below.
-            #
-            # `xcode-select --install` pops a separate system GUI dialog
-            # ("Finding Software...") that this process can't track,
-            # can't time out, and can't report progress on — installing
-            # via `softwareupdate` directly instead (the same mechanism
-            # Homebrew's own bootstrap script uses internally) keeps
-            # everything in this process's own log, with a real timeout.
-            xcode_check = subprocess.run(
-                ["xcode-select", "-p"],
-                capture_output=True, text=True, env=env
-            )
-            if xcode_check.returncode != 0:
-                self._log("Xcode Command Line Tools not found — installing "
-                          "(this can take several minutes)...")
-                self._set_status("Installing Xcode Command Line Tools...")
-                clt_script = os.path.join(tempfile.gettempdir(), "ft_install_clt.sh")
-                with open(clt_script, "w") as f:
+            if need_python or need_clt or need_brew:
+                self._set_status("Checking system requirements...")
+                askpass_script = os.path.join(tempfile.gettempdir(), "ft_sudo_askpass.sh")
+                with open(askpass_script, "w") as f:
                     f.write(
                         "#!/bin/bash\n"
+                        "osascript -e 'display dialog "
+                        "\"Finishing Tool needs your password to continue "
+                        "installing:\" default answer \"\" with hidden answer "
+                        "with title \"Finishing Tool Installer\" buttons {\"OK\"} "
+                        "default button \"OK\"' "
+                        "-e 'text returned of result' 2>/dev/null\n"
+                    )
+                os.chmod(askpass_script, 0o755)
+                preflight_env = env.copy()
+                preflight_env["SUDO_ASKPASS"] = askpass_script
+
+                script_body = (
+                    "#!/bin/bash\n"
+                    "set -e\n"
+                    # One shared authorization for every sudo call below —
+                    # a single script making sequential `sudo -A` calls
+                    # always reuses the same ticket within itself.
+                    "sudo -A -v\n"
+                    "( while true; do sudo -n -v; sleep 60; done ) &\n"
+                    "KEEPALIVE_PID=$!\n"
+                    'trap "kill $KEEPALIVE_PID 2>/dev/null" EXIT\n'
+                )
+                if need_python:
+                    script_body += (
+                        "echo FT_STAGE:python_installing\n"
+                        "curl -fsSL -o /tmp/ft_python-3.13.0.pkg "
+                        "\"https://www.python.org/ftp/python/3.13.0/python-3.13.0-macos11.pkg\"\n"
+                        "sudo -A installer -pkg /tmp/ft_python-3.13.0.pkg -target /\n"
+                        "echo FT_STAGE:python_done\n"
+                    )
+                if need_clt:
+                    script_body += (
+                        "echo FT_STAGE:clt_installing\n"
                         "touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress\n"
                         "CLT_LABEL=$(softwareupdate -l 2>/dev/null | "
                         "grep -B 1 -E 'Command Line Tools' | "
                         "awk -F'*' '/^ *\\*/ {print $2}' | "
                         "sed -e 's/^ *Label: //' -e 's/^ *//' | sort -V | tail -n1)\n"
-                        "if [ -n \"$CLT_LABEL\" ]; then\n"
-                        "  softwareupdate -i \"$CLT_LABEL\"\n"
-                        "fi\n"
+                        "if [ -n \"$CLT_LABEL\" ]; then sudo -A softwareupdate -i \"$CLT_LABEL\"; fi\n"
                         "rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress\n"
+                        "echo FT_STAGE:clt_done\n"
                     )
-                os.chmod(clt_script, 0o755)
-                if not self._ensure_sudo_authenticated(env):
-                    self._log("⚠ Could not authenticate for Xcode Command Line Tools "
-                              "install — continuing anyway.")
-                else:
-                    try:
-                        r = subprocess.run(["sudo", "-A", "bash", clt_script],
-                                           env=self._sudo_env, capture_output=True,
-                                           text=True, timeout=900)
-                        if os.path.exists("/Library/Developer/CommandLineTools"):
-                            self._log("Xcode Command Line Tools installed ✓")
-                        else:
-                            self._log(f"⚠ CLT install may not have finished: {r.stderr.strip()} "
-                                      f"— continuing anyway.")
-                    except subprocess.TimeoutExpired:
-                        self._log("⚠ Xcode Command Line Tools install timed out after 15 "
-                                  "minutes — continuing anyway.")
-            else:
-                self._log("Xcode Command Line Tools found ✓")
-
-            # Step 0: Homebrew
-            self._set_step(0, "active")
-            self._set_status("Checking Homebrew...")
-            # Note: `if/else` binds looser than `or` in Python, so a naive
-            # "shutil.which(...) or X if cond else Y" would silently drop
-            # the shutil.which() result whenever cond is False. Mirror the
-            # same explicit path-first pattern used after a fresh install
-            # below instead of chaining `or` with an untested ternary.
-            brew = ("/opt/homebrew/bin/brew" if os.path.exists("/opt/homebrew/bin/brew")
-                    else "/usr/local/bin/brew" if os.path.exists("/usr/local/bin/brew")
-                    else shutil.which("brew"))
-            if not brew or not os.path.exists(brew):
-                self._log("Homebrew not found — installing...")
-                self._set_status("Installing Homebrew...")
-
-                # Homebrew's own installer has a hard-coded safety check
-                # that REFUSES to run as root — so it can't be wrapped in
-                # "with administrator privileges" (that runs everything as
-                # root) like the other pre-flight installs. It needs sudo
-                # for SEVERAL of its own internal steps (prefix, cache, and
-                # repository directories, not just one) — verified by
-                # reading Homebrew's actual current install.sh, not
-                # assumed. It finds sudo access via SUDO_ASKPASS, same as
-                # Python 3.13/Xcode CLT above — _ensure_sudo_authenticated
-                # is idempotent, so if either of those already prompted
-                # this run, this reuses that same authorization instead of
-                # prompting a third time.
-                if not self._ensure_sudo_authenticated(env):
-                    self._log("Homebrew install failed: could not authenticate.")
-                    self._set_step(0, "error")
-                    self._set_status("Authentication failed — check log.")
-                    return
-                brew_env = self._sudo_env.copy()
-                brew_env["NONINTERACTIVE"] = "1"
-
-                brew_script = os.path.join(tempfile.gettempdir(), "ft_install_brew.sh")
-                with open(brew_script, "w") as f:
-                    f.write(
-                        "#!/bin/bash\n"
+                if need_brew:
+                    script_body += (
+                        "echo FT_STAGE:brew_installing\n"
                         # Must be run via `bash -c "<script text>"` — a bare
                         # `"$(curl ...)"` on its own line treats the ENTIRE
                         # downloaded script as a single command/path to
                         # execute instead of running it, which fails with
-                        # "File name too long" once bash tries to resolve
-                        # that giant string as a path (it contains "/"
-                        # characters throughout, so bash treats it as a
-                        # literal path rather than searching $PATH for it).
-                        '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"\n'
+                        # "File name too long" (it contains "/" characters
+                        # throughout, so bash treats it as a literal path
+                        # rather than searching $PATH for it).
+                        'NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL '
+                        'https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"\n'
+                        "echo FT_STAGE:brew_done\n"
                     )
-                os.chmod(brew_script, 0o755)
-                # Stream output live instead of capturing it and dumping
-                # the whole thing as one blob on failure — Homebrew's own
-                # script already prints clean, readable status lines as it
-                # runs, so this shows real progress instead of a raw text
-                # dump at the end (or nothing at all, on success).
-                # Run as the current user, NOT admin-privileged — see note
-                # above about Homebrew's own root check.
+
+                preflight_script = os.path.join(tempfile.gettempdir(), "ft_preflight.sh")
+                with open(preflight_script, "w") as f:
+                    f.write(script_body)
+                os.chmod(preflight_script, 0o755)
+
                 proc = subprocess.Popen(
-                    [brew_script],
+                    [preflight_script],
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1, env=brew_env
+                    text=True, bufsize=1, env=preflight_env
                 )
                 start_time = time.time()
                 timed_out = False
                 for line in iter(proc.stdout.readline, ""):
                     stripped = line.rstrip()
-                    if stripped:
+                    if stripped == "FT_STAGE:python_installing":
+                        self._set_status("Installing Python 3.13 (this may take a minute)...")
+                        self._log("Installing Python 3.13...")
+                    elif stripped == "FT_STAGE:python_done":
+                        self._log("Python 3.13 installed ✓")
+                    elif stripped == "FT_STAGE:clt_installing":
+                        self._set_status("Installing Xcode Command Line Tools...")
+                        self._log("Installing Xcode Command Line Tools "
+                                  "(this can take several minutes)...")
+                    elif stripped == "FT_STAGE:clt_done":
+                        self._log("Xcode Command Line Tools installed ✓")
+                    elif stripped == "FT_STAGE:brew_installing":
+                        self._set_status("Installing Homebrew...")
+                        self._log("Installing Homebrew...")
+                    elif stripped == "FT_STAGE:brew_done":
+                        self._log("Homebrew installed ✓")
+                    elif stripped:
                         self._log(stripped)
-                    if time.time() - start_time > 600:
-                        proc.kill()
+                    if time.time() - start_time > 1800:
+                        proc.terminate()
                         timed_out = True
                         break
                 proc.stdout.close()
                 proc.wait()
 
                 if timed_out:
-                    self._log("Homebrew install timed out after 10 minutes.")
+                    self._log("Pre-flight install timed out after 30 minutes.")
                     self._set_step(0, "error")
-                    self._set_status("Homebrew install timed out — check your network and retry.")
+                    self._set_status("Install timed out — check your network and retry.")
                     return
                 if proc.returncode != 0:
-                    self._log(f"Homebrew install failed (exit {proc.returncode}) — see log above.")
+                    self._log(f"Pre-flight install failed (exit {proc.returncode}) — see log above.")
                     self._set_step(0, "error")
-                    self._set_status("Homebrew install failed — check log.")
+                    self._set_status("Install failed — check log.")
                     return
-                brew = ("/opt/homebrew/bin/brew" if os.path.exists("/opt/homebrew/bin/brew")
-                        else "/usr/local/bin/brew" if os.path.exists("/usr/local/bin/brew")
-                        else shutil.which("brew"))
-                if not brew:
-                    self._set_step(0, "error")
-                    self._set_status("Homebrew install failed.")
+                if need_python and not os.path.exists(python):
+                    self._log("  ✗ Python 3.13 still not found after install.")
+                    self._set_status("Python 3.13 install failed — check log.")
                     return
-                # Update PATH with new brew location
-                brew_dir = os.path.dirname(brew)
-                env["PATH"] = brew_dir + ":" + env["PATH"]
+                if need_clt and not os.path.exists("/Library/Developer/CommandLineTools"):
+                    self._log("⚠ Xcode Command Line Tools still not found — continuing anyway.")
             else:
-                self._log("Homebrew found ✓")
-                brew_dir = os.path.dirname(brew)
-                env["PATH"] = brew_dir + ":" + env["PATH"]
+                self._log("Python 3.13 found ✓")
+                self._log("Xcode Command Line Tools found ✓")
+
+            # Step 0: Homebrew
+            self._set_step(0, "active")
+            self._set_status("Checking Homebrew...")
+            brew = ("/opt/homebrew/bin/brew" if os.path.exists("/opt/homebrew/bin/brew")
+                    else "/usr/local/bin/brew" if os.path.exists("/usr/local/bin/brew")
+                    else shutil.which("brew"))
+            if not brew or not os.path.exists(brew):
+                self._set_step(0, "error")
+                self._set_status("Homebrew install failed.")
+                return
+            self._log("Homebrew found ✓")
+            brew_dir = os.path.dirname(brew)
+            env["PATH"] = brew_dir + ":" + env["PATH"]
             self._set_step(0, "done")
             self._set_progress(1/total)
 
@@ -572,13 +483,6 @@ class InstallerApp(tk.Tk):
         except Exception as e:
             self._log(f"Error: {e}")
             self._set_status(f"Installation failed: {e}")
-        finally:
-            # Stop the sudo keepalive loop (if it was ever started) no
-            # matter how _install() exits — success, an early return, or
-            # an exception — so it doesn't linger as an orphaned
-            # background process after the installer is done.
-            if getattr(self, "_sudo_keepalive_proc", None) is not None:
-                self._sudo_keepalive_proc.kill()
 
     def _show_done(self):
         self._install_btn.place_forget()
