@@ -5,6 +5,74 @@ VFX Plate Exporter — single-file entry point.
 
 import sys
 import os
+# pymiere's core.py does `from distutils.version import StrictVersion` —
+# distutils was removed from the standard library entirely in Python
+# 3.12+ (this app runs on 3.13). `import setuptools` first (setuptools
+# carries its own distutils compatibility shim) fixes this when running
+# from source, but breaks the py2app-built app specifically: the shim's
+# _distutils_hack machinery pulls in jaraco.functools, a transitive
+# dependency py2app's static analysis doesn't discover/bundle, so the
+# built app fails at launch with ModuleNotFoundError: No module named
+# 'jaraco.functools' instead. pymiere only ever uses StrictVersion for
+# a simple Premiere-Pro-version comparison, so a small self-contained
+# replacement sidesteps the entire setuptools dependency chain.
+import types
+import re as _re
+import functools as _functools
+
+
+def _install_distutils_version_shim():
+    if "distutils.version" in sys.modules:
+        return
+
+    @_functools.total_ordering
+    class StrictVersion:
+        version_re = _re.compile(r'^(\d+)\.(\d+)(\.(\d+))?([ab](\d+))?$')
+
+        def __init__(self, vstring=None):
+            self.version = ()
+            self.prerelease = None
+            self.vstring = vstring
+            if vstring:
+                self.parse(vstring)
+
+        def parse(self, vstring):
+            match = self.version_re.match(vstring)
+            if not match:
+                raise ValueError(f"invalid version number '{vstring}'")
+            major, minor, patch, prerelease, prerelease_num = match.group(1, 2, 4, 5, 6)
+            self.version = (int(major), int(minor), int(patch or 0))
+            self.prerelease = (prerelease, int(prerelease_num)) if prerelease else None
+            self.vstring = vstring
+
+        def __str__(self):
+            return self.vstring
+
+        def __repr__(self):
+            return f"StrictVersion('{self}')"
+
+        def _cmp_key(self):
+            return (self.version, self.prerelease is None, self.prerelease or ())
+
+        def __eq__(self, other):
+            if isinstance(other, str):
+                other = StrictVersion(other)
+            return self._cmp_key() == other._cmp_key()
+
+        def __lt__(self, other):
+            if isinstance(other, str):
+                other = StrictVersion(other)
+            return self._cmp_key() < other._cmp_key()
+
+    distutils_mod = types.ModuleType("distutils")
+    version_mod = types.ModuleType("distutils.version")
+    version_mod.StrictVersion = StrictVersion
+    distutils_mod.version = version_mod
+    sys.modules.setdefault("distutils", distutils_mod)
+    sys.modules["distutils.version"] = version_mod
+
+
+_install_distutils_version_shim()
 
 # ─── Version & update config ────────────────────────────────────────────────
 VERSION_URL     = "https://raw.githubusercontent.com/esandijp-dotcom/finishing-tool/main/version.json"
