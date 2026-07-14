@@ -213,7 +213,7 @@ class InstallerApp(tk.Tk):
                     install_py = (f'do shell script "installer -pkg \\"{py_pkg}\\" -target /" '
                                   f'with administrator privileges')
                     r = subprocess.run(["osascript", "-e", install_py],
-                                       capture_output=True, text=True)
+                                       capture_output=True, text=True, timeout=300)
                     if r.returncode != 0 or not os.path.exists(python):
                         self._log(f"  ✗ Python install failed: {r.stderr.strip()}")
                         self._set_status("Python 3.13 install failed — check log.")
@@ -226,31 +226,54 @@ class InstallerApp(tk.Tk):
             else:
                 self._log("Python 3.13 found ✓")
 
-            # Pre-flight: Xcode Command Line Tools
+            # Pre-flight: Xcode Command Line Tools. None of this app's own
+            # pip packages need a compiler (verified — they're all prebuilt
+            # wheels or pure Python), but Homebrew's own installer needs
+            # CLT for git, so this is a real transitive requirement via the
+            # Homebrew step below.
+            #
+            # `xcode-select --install` pops a separate system GUI dialog
+            # ("Finding Software...") that this process can't track,
+            # can't time out, and can't report progress on — installing
+            # via `softwareupdate` directly instead (the same mechanism
+            # Homebrew's own bootstrap script uses internally) keeps
+            # everything in this process's own log, with a real timeout.
             xcode_check = subprocess.run(
                 ["xcode-select", "-p"],
                 capture_output=True, text=True
             )
             if xcode_check.returncode != 0:
-                self._log("Xcode Command Line Tools not found — installing...")
+                self._log("Xcode Command Line Tools not found — installing "
+                          "(this can take several minutes)...")
                 self._set_status("Installing Xcode Command Line Tools...")
-                # No admin privileges needed for this one — it just pops the
-                # Software Update GUI dialog. Routing it through a
-                # privileged osascript shell (like the other pre-flight
-                # installs) risks the dialog failing to display since a
-                # privileged shell doesn't have the user's window-server
-                # session.
-                subprocess.run(["xcode-select", "--install"], capture_output=True)
-                import time
-                # Wait up to 2 min for CLT install
-                for _ in range(24):
-                    time.sleep(5)
-                    r = subprocess.run(["xcode-select", "-p"], capture_output=True)
-                    if r.returncode == 0:
+                clt_script = os.path.join(tempfile.gettempdir(), "ft_install_clt.sh")
+                with open(clt_script, "w") as f:
+                    f.write(
+                        "#!/bin/bash\n"
+                        "touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress\n"
+                        "CLT_LABEL=$(softwareupdate -l 2>/dev/null | "
+                        "grep -B 1 -E 'Command Line Tools' | "
+                        "awk -F'*' '/^ *\\*/ {print $2}' | "
+                        "sed -e 's/^ *Label: //' -e 's/^ *//' | sort -V | tail -n1)\n"
+                        "if [ -n \"$CLT_LABEL\" ]; then\n"
+                        "  softwareupdate -i \"$CLT_LABEL\"\n"
+                        "fi\n"
+                        "rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress\n"
+                    )
+                os.chmod(clt_script, 0o755)
+                apple_script = (f'do shell script "{clt_script}" '
+                                f'with administrator privileges')
+                try:
+                    r = subprocess.run(["osascript", "-e", apple_script],
+                                       capture_output=True, text=True, timeout=900)
+                    if os.path.exists("/Library/Developer/CommandLineTools"):
                         self._log("Xcode Command Line Tools installed ✓")
-                        break
-                else:
-                    self._log("⚠ Could not verify Xcode CLT — continuing anyway...")
+                    else:
+                        self._log(f"⚠ CLT install may not have finished: {r.stderr.strip()} "
+                                  f"— continuing anyway.")
+                except subprocess.TimeoutExpired:
+                    self._log("⚠ Xcode Command Line Tools install timed out after 15 "
+                              "minutes — continuing anyway.")
             else:
                 self._log("Xcode Command Line Tools found ✓")
 
@@ -268,17 +291,34 @@ class InstallerApp(tk.Tk):
             if not brew or not os.path.exists(brew):
                 self._log("Homebrew not found — installing...")
                 self._set_status("Installing Homebrew...")
-                install_cmd = ('NONINTERACTIVE=1 /bin/bash -c '
-                               '"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"')
+                # Written to a script file rather than inlined into the
+                # AppleScript string — install_cmd's own embedded double
+                # quotes (from "$(curl ...)") would otherwise collide with
+                # the outer `do shell script "..."` quotes and truncate it
+                # early, producing an AppleScript syntax error (-2740).
+                brew_script = os.path.join(tempfile.gettempdir(), "ft_install_brew.sh")
+                with open(brew_script, "w") as f:
+                    f.write(
+                        "#!/bin/bash\n"
+                        "NONINTERACTIVE=1 /bin/bash -c "
+                        '"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"\n'
+                    )
+                os.chmod(brew_script, 0o755)
                 # Use native macOS admin auth dialog (lock icon prompt)
                 apple_script = (
-                    f'do shell script "{install_cmd}" '
+                    f'do shell script "{brew_script}" '
                     f'with administrator privileges'
                 )
-                proc = subprocess.run(
-                    ["osascript", "-e", apple_script],
-                    capture_output=True, text=True
-                )
+                try:
+                    proc = subprocess.run(
+                        ["osascript", "-e", apple_script],
+                        capture_output=True, text=True, timeout=600
+                    )
+                except subprocess.TimeoutExpired:
+                    self._log("Homebrew install timed out after 10 minutes.")
+                    self._set_step(0, "error")
+                    self._set_status("Homebrew install timed out — check your network and retry.")
+                    return
                 if proc.returncode != 0:
                     self._log(f"Homebrew install failed: {proc.stderr.strip()}")
                     self._set_step(0, "error")
