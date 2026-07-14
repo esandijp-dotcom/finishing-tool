@@ -16,12 +16,21 @@ ERROR        = "#E05555"
 
 GITHUB_BASE  = "https://raw.githubusercontent.com/esandijp-dotcom/finishing-tool/main"
 FILES        = ["main.py", "thinking.gif", "icon.png", "version.json",
-                "build_and_install.sh", "setup.py", "build_icon.py"]
+                "build_and_install.sh", "setup.py", "build_icon.py",
+                "pymiere_link.zxp"]
+# Bundled into the app by setup.py's DATA_FILES — must exist in the build
+# dir before `setup.py py2app` runs, or the build fails outright.
+AME_PRESET_FILES = ["LIVE.epr", "MARKETING.epr", "SOCIAL MEDIA.epr", "LIVE WITH SRTs.epr"]
+# Installed straight into DaVinci Resolve's own preset folder — main.py
+# calls LoadRenderPreset("02_COLORED VFX 4444 XQ") by name and expects
+# Resolve to already know about it.
+RENDER_PRESET_FILES = ["01_STRINGOUT Render.xml", "02_COLORED VFX 4444 XQ Render.xml",
+                        "03_PREMIERE XML Render.xml"]
 
 STEPS = [
     "Checking for Homebrew...",
     "Installing Tesseract OCR...",
-    "Downloading source files...",
+    "Downloading files & installing presets...",
     "Building & installing app...",
 ]
 
@@ -302,7 +311,7 @@ class InstallerApp(tk.Tk):
             # Step 2: Download all source files from GitHub
             self._set_step(2, "active")
             self._set_status("Downloading source files...")
-            import urllib.request, ssl
+            import urllib.request, urllib.parse, ssl
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
@@ -310,8 +319,8 @@ class InstallerApp(tk.Tk):
             build_dir = os.path.expanduser("~/Applications/FinishingToolBuild")
             os.makedirs(build_dir, exist_ok=True)
 
-            for fname in FILES:
-                url = f"{GITHUB_BASE}/{fname}"
+            for fname in FILES + AME_PRESET_FILES + RENDER_PRESET_FILES:
+                url = f"{GITHUB_BASE}/{urllib.parse.quote(fname)}"
                 dst = os.path.join(build_dir, fname)
                 self._log(f"  Downloading {fname}...")
                 try:
@@ -324,6 +333,23 @@ class InstallerApp(tk.Tk):
                     self._log(f"  ✗ {e}")
                     return
             self._log("All files downloaded ✓")
+
+            # DaVinci render presets install straight into Resolve's preset
+            # folder here — Resolve doesn't need to be running, and this is
+            # non-fatal if the folder can't be created (e.g. Resolve isn't
+            # installed on this machine at all; the VFX tab just won't work).
+            self._set_status("Installing DaVinci render presets...")
+            resolve_presets_dir = os.path.expanduser(
+                "~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Presets/Render")
+            try:
+                os.makedirs(resolve_presets_dir, exist_ok=True)
+                for fname in RENDER_PRESET_FILES:
+                    shutil.copy(os.path.join(build_dir, fname),
+                                os.path.join(resolve_presets_dir, fname))
+                self._log("DaVinci render presets installed ✓")
+            except Exception as e:
+                self._log(f"⚠ Could not install DaVinci render presets: {e}")
+
             self._set_step(2, "done")
             self._set_progress(3/total)
 
