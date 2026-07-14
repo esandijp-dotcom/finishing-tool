@@ -1616,23 +1616,20 @@ class VFXExporterApp(tk.Tk):
 
         # EPISODES NESTED chip box (like ep_outer in VFX tab)
         self._section_label(main, "EPISODES NESTED")
-        # Horizontal inset (padx=12) stays on the outer frame itself — a
-        # Frame's own padx/pady constructor options only take a single
-        # scalar (applied to both sides), not a tuple, so the asymmetric
-        # top/bottom inset below is done via the inner frame's pack() call
-        # instead, which does support a (top, bottom) tuple.
-        self._pp_nest_ep_outer = tk.Frame(main, bg="#252525", padx=12)
+        # padx=12, pady=0 on the outer frame + symmetric pady=12 on the
+        # inner frame's pack() — matches VFX's ep_outer (DETECTED EPISODES)
+        # exactly, so both boxes are the same height when empty (24px:
+        # 12 top + 12 bottom). The "REEL N" header label packed inside
+        # this frame (see _pp_build_reel_chips/_pp_refresh_chip_visibility)
+        # has its own pady=(2, 2) on top of this once populated — a
+        # visible gap difference vs. DETECTED EPISODES once reels exist,
+        # but matching the shared empty-state box height takes priority.
+        self._pp_nest_ep_outer = tk.Frame(main, bg="#252525", padx=12, pady=0)
         # bottom=20 (was 8) — extra separation from PHASE 2's header below,
         # which otherwise sat close enough to read as part of this box.
         self._pp_nest_ep_outer.pack(fill="x", pady=(0, 20))
         self._pp_nest_chips_frame = tk.Frame(self._pp_nest_ep_outer, bg="#252525")
-        # Bottom stays 12 (matches VFX's ep_outer box). Top trimmed to 3 —
-        # the "REEL N" header label packed inside this frame (see
-        # _pp_build_reel_chips/_pp_refresh_chip_visibility) has its own
-        # pady=(2, 2) on top of this, so this alone isn't the full gap
-        # above "REEL 1" — both needed trimming together to actually be
-        # noticeable.
-        self._pp_nest_chips_frame.pack(fill="x", pady=(3, 12))
+        self._pp_nest_chips_frame.pack(fill="x", pady=12)
         tk.Frame(self._pp_nest_chips_frame, bg="#252525", width=0, height=0).pack()
 
         # ── PHASE 2 — EXPORT ──────────────────────────────────────────────
@@ -1751,9 +1748,11 @@ class VFXExporterApp(tk.Tk):
         self.btn_clear_all_exp.bind("<Leave>",           lambda e: self.btn_clear_all_exp.config(bg=BG_INPUT))
         self.btn_clear_all_exp.bind("<ButtonPress-1>",   lambda e: self.btn_clear_all_exp.config(bg="#1a1a1a"))
         self.btn_clear_all_exp.bind("<ButtonRelease-1>", lambda e: (self.btn_clear_all_exp.config(bg="#3a3a3a"), self._pp_clear_all_exp()))
-        # pady=12 matches VFX's ep_outer (DETECTED EPISODES) box exactly —
-        # see the matching comment on _pp_nest_ep_outer above.
-        self._pp_exp_ep_outer = tk.Frame(main, bg="#252525", padx=12, pady=12)
+        # padx=12, pady=0 on the outer frame + symmetric pady=12 on the
+        # canvas's pack() — matches VFX's ep_outer (DETECTED EPISODES)
+        # exactly, same as _pp_nest_ep_outer above, so all three chip
+        # boxes are the same height when empty (24px: 12 top + 12 bottom).
+        self._pp_exp_ep_outer = tk.Frame(main, bg="#252525", padx=12, pady=0)
         self._pp_exp_ep_outer.pack(fill="x", pady=(0, 8))
         # Chips live inside a Canvas (not a plain Frame) so _pp_resize_window
         # can cap this area's height and let it scroll once the window would
@@ -1761,12 +1760,22 @@ class VFXExporterApp(tk.Tk):
         # everything below it stays visible instead of getting pushed off.
         # The scrollbar itself is only packed in when actually needed (see
         # _pp_resize_window), not shown for a queue that fits naturally.
+        # height=1 here matters: unlike a plain Frame, a Canvas doesn't
+        # auto-shrink to fit empty content — left unset, it renders at
+        # Tk's built-in default (198px) until _pp_resize_window() first
+        # runs to shrink it, which only happens later (on connect/nest/
+        # queue changes) — so a fresh, empty queue would otherwise show
+        # as a big empty grey box for no reason. 1 (not 0) because Tk
+        # enforces a hard 1px floor on Canvas height regardless — this
+        # box ends up 1px taller than the other two (25px vs. 24px) for
+        # that reason alone, as close a match as a Canvas structurally
+        # allows.
         self._pp_exp_scroll_canvas = tk.Canvas(self._pp_exp_ep_outer, bg="#252525",
-                                                highlightthickness=0)
+                                                highlightthickness=0, height=1)
         self._pp_exp_scrollbar = tk.Scrollbar(self._pp_exp_ep_outer, orient="vertical",
                                                command=self._pp_exp_scroll_canvas.yview)
         self._pp_exp_scroll_canvas.configure(yscrollcommand=self._pp_exp_scrollbar.set)
-        self._pp_exp_scroll_canvas.pack(side="left", fill="both", expand=True)
+        self._pp_exp_scroll_canvas.pack(side="left", fill="both", expand=True, pady=12)
         self._pp_exp_chips_frame = tk.Frame(self._pp_exp_scroll_canvas, bg="#252525")
         self._pp_exp_chips_window = self._pp_exp_scroll_canvas.create_window(
             (0, 0), window=self._pp_exp_chips_frame, anchor="nw")
@@ -1874,7 +1883,7 @@ class VFXExporterApp(tk.Tk):
         if full_height > max_height:
             capped_chip_height = max(60, max_height - non_chip_height)
             self._pp_exp_scroll_canvas.configure(height=capped_chip_height)
-            self._pp_exp_scrollbar.pack(side="right", fill="y")
+            self._pp_exp_scrollbar.pack(side="right", fill="y", pady=12)
             # A single update_idletasks() doesn't reliably finish
             # propagating a canvas height change into the actual rendered
             # layout when there are hundreds of chip widgets in the tree
@@ -6894,8 +6903,29 @@ class VFXExporterApp(tk.Tk):
         # fails to grow it on macOS unless briefly unlocked first (every
         # other resize call in the app already does this; this one didn't).
         self.resizable(False, True)
-        self.geometry(f"{APP_WIDTH}x{self.winfo_reqheight()}")
+        target_height = self.winfo_reqheight()
+        self.geometry(f"{APP_WIDTH}x{target_height}")
         self.resizable(False, False)
+        self.update_idletasks()
+        # Same macOS quirk _pp_resize_window() already works around: a
+        # single resizable(False,True) -> geometry() -> resizable(False,False)
+        # pass doesn't reliably apply a LARGE jump in height, and VFX vs.
+        # Episode Export is one of the biggest jumps in the app —
+        # winfo_height() can end up well short of target_height right
+        # after this call. An immediate nested retry doesn't help
+        # (confirmed elsewhere); only a genuinely separate, later call
+        # does, once Tk's event queue has drained.
+        if (abs(self.winfo_height() - target_height) > 4
+                and not getattr(self, "_switch_tab_resize_retry_pending", False)):
+            self._switch_tab_resize_retry_pending = True
+
+            def _switch_tab_resize_retry():
+                self._switch_tab_resize_retry_pending = False
+                self.update_idletasks()
+                self.resizable(False, True)
+                self.geometry(f"{APP_WIDTH}x{self.winfo_reqheight()}")
+                self.resizable(False, False)
+            self.after(50, _switch_tab_resize_retry)
 
     def _build_log_window(self, title):
         """Floating log window, shared by both tabs — keeps log height from

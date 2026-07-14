@@ -3,7 +3,7 @@ Finishing Tool Installer
 Downloads source files from GitHub and builds the app locally.
 """
 import tkinter as tk
-import threading, subprocess, sys, os, shutil, tempfile
+import threading, subprocess, sys, os, shutil, tempfile, time
 
 ACCENT       = "#E8A838"
 ACCENT_HOVER = "#f0c060"
@@ -191,13 +191,36 @@ class InstallerApp(tk.Tk):
             env = os.environ.copy()
             env["PATH"] = ("/Library/Frameworks/Python.framework/Versions/3.13/bin:"
                            "/opt/homebrew/bin:/usr/local/bin:" + env.get("PATH", ""))
+            # This app is normally launched by double-clicking it in Finder,
+            # not from Terminal — GUI-launched apps get a much sparser
+            # environment from launchd than a login shell does, and USER/
+            # LOGNAME are often simply absent from it (they're populated by
+            # shell startup files, not by the OS itself). Homebrew's own
+            # installer checks $USER against the admin group's member list
+            # to decide whether to proceed — if $USER is empty, that check
+            # can never match, and Homebrew wrongly reports the account
+            # isn't an administrator even when it genuinely is. Derive the
+            # username from the process's real UID instead (a syscall via
+            # pwd, independent of any environment variable) and force it
+            # into the env every subprocess call below inherits.
+            import pwd
+            current_user = pwd.getpwuid(os.getuid()).pw_name
+            env["USER"] = current_user
+            env["LOGNAME"] = current_user
 
             # Pre-flight: Python 3.13
             python = "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3"
             if not os.path.exists(python):
                 self._log("Python 3.13 not found — downloading and installing...")
                 self._set_status("Installing Python 3.13 (this may take a minute)...")
-                import urllib.request, ssl, tempfile
+                # tempfile is already imported at module level (line 6) —
+                # do NOT re-import it locally here. Python scopes a name as
+                # local to the whole function the moment it's imported
+                # anywhere inside it, even conditionally, which would
+                # shadow the module-level import for the rest of _install()
+                # and break every other tempfile.* call below whenever this
+                # branch (Python 3.13 already installed) is skipped.
+                import urllib.request, ssl
                 ctx_py = ssl.create_default_context()
                 ctx_py.check_hostname = False
                 ctx_py.verify_mode = ssl.CERT_NONE
@@ -240,7 +263,7 @@ class InstallerApp(tk.Tk):
             # everything in this process's own log, with a real timeout.
             xcode_check = subprocess.run(
                 ["xcode-select", "-p"],
-                capture_output=True, text=True
+                capture_output=True, text=True, env=env
             )
             if xcode_check.returncode != 0:
                 self._log("Xcode Command Line Tools not found — installing "
@@ -291,36 +314,106 @@ class InstallerApp(tk.Tk):
             if not brew or not os.path.exists(brew):
                 self._log("Homebrew not found — installing...")
                 self._set_status("Installing Homebrew...")
-                # Written to a script file rather than inlined into the
-                # AppleScript string — install_cmd's own embedded double
-                # quotes (from "$(curl ...)") would otherwise collide with
-                # the outer `do shell script "..."` quotes and truncate it
-                # early, producing an AppleScript syntax error (-2740).
+
+                # Homebrew's own installer has a hard-coded safety check
+                # that REFUSES to run as root — so it can't be wrapped in
+                # "with administrator privileges" (that runs everything as
+                # root) like the other pre-flight installs. It needs sudo
+                # for SEVERAL of its own internal steps (prefix, cache, and
+                # repository directories, not just one) — verified by
+                # reading Homebrew's actual current install.sh, not
+                # assumed. With NONINTERACTIVE=1 alone, Homebrew runs
+                # `sudo -n` internally (never prompts, fails immediately
+                # if there's no already-cached authorization) — and this
+                # subprocess has no terminal and no prior sudo session, so
+                # that check fails every time regardless of whether the
+                # account is really an admin, producing the misleading
+                # "needs to be an Administrator" message. The fix Homebrew
+                # itself supports for exactly this: SUDO_ASKPASS. Homebrew
+                # checks for it and switches its internal `sudo` calls
+                # from `-n` (fail silently) to `-A` (prompt via this
+                # script) — pointed at a small script that pops a native
+                # macOS password dialog.
+                askpass_script = os.path.join(tempfile.gettempdir(), "ft_sudo_askpass.sh")
+                with open(askpass_script, "w") as f:
+                    f.write(
+                        "#!/bin/bash\n"
+                        "osascript -e 'display dialog "
+                        "\"Finishing Tool needs your password to finish "
+                        "installing Homebrew:\" default answer \"\" "
+                        "with hidden answer with title "
+                        "\"Finishing Tool Installer\" buttons {\"OK\"} "
+                        "default button \"OK\"' "
+                        "-e 'text returned of result' 2>/dev/null\n"
+                    )
+                os.chmod(askpass_script, 0o755)
+
+                brew_env = env.copy()
+                brew_env["SUDO_ASKPASS"] = askpass_script
+                brew_env["NONINTERACTIVE"] = "1"
+
                 brew_script = os.path.join(tempfile.gettempdir(), "ft_install_brew.sh")
                 with open(brew_script, "w") as f:
                     f.write(
                         "#!/bin/bash\n"
-                        "NONINTERACTIVE=1 /bin/bash -c "
-                        '"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"\n'
+                        # Homebrew's script makes several SEPARATE internal
+                        # sudo calls (prefix, cache, repository dirs, etc.),
+                        # each via SUDO_ASKPASS. Without a real terminal
+                        # session, macOS doesn't reliably carry the
+                        # authorization from one sudo call to the next, so
+                        # each one would otherwise re-prompt independently.
+                        # Standard fix: authenticate once up front, then
+                        # keep that authorization alive in the background
+                        # (a periodic no-op `sudo -n -v` touch) for the
+                        # rest of the install so every later sudo call
+                        # reuses it instead of asking again.
+                        "sudo -A -v\n"
+                        "( while true; do sudo -n -v; sleep 60; done ) &\n"
+                        "KEEPALIVE_PID=$!\n"
+                        'trap "kill $KEEPALIVE_PID 2>/dev/null" EXIT\n'
+                        # Must be run via `bash -c "<script text>"` — a bare
+                        # `"$(curl ...)"` on its own line treats the ENTIRE
+                        # downloaded script as a single command/path to
+                        # execute instead of running it, which fails with
+                        # "File name too long" once bash tries to resolve
+                        # that giant string as a path (it contains "/"
+                        # characters throughout, so bash treats it as a
+                        # literal path rather than searching $PATH for it).
+                        '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"\n'
                     )
                 os.chmod(brew_script, 0o755)
-                # Use native macOS admin auth dialog (lock icon prompt)
-                apple_script = (
-                    f'do shell script "{brew_script}" '
-                    f'with administrator privileges'
+                # Stream output live instead of capturing it and dumping
+                # the whole thing as one blob on failure — Homebrew's own
+                # script already prints clean, readable status lines as it
+                # runs, so this shows real progress instead of a raw text
+                # dump at the end (or nothing at all, on success).
+                # Run as the current user, NOT admin-privileged — see note
+                # above about Homebrew's own root check.
+                proc = subprocess.Popen(
+                    [brew_script],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1, env=brew_env
                 )
-                try:
-                    proc = subprocess.run(
-                        ["osascript", "-e", apple_script],
-                        capture_output=True, text=True, timeout=600
-                    )
-                except subprocess.TimeoutExpired:
+                start_time = time.time()
+                timed_out = False
+                for line in iter(proc.stdout.readline, ""):
+                    stripped = line.rstrip()
+                    if stripped:
+                        self._log(stripped)
+                    if time.time() - start_time > 600:
+                        proc.kill()
+                        timed_out = True
+                        break
+                proc.stdout.close()
+                proc.wait()
+
+                if timed_out:
                     self._log("Homebrew install timed out after 10 minutes.")
                     self._set_step(0, "error")
                     self._set_status("Homebrew install timed out — check your network and retry.")
                     return
                 if proc.returncode != 0:
-                    self._log(f"Homebrew install failed: {proc.stderr.strip()}")
+                    self._log(f"Homebrew install failed (exit {proc.returncode}) — see log above.")
                     self._set_step(0, "error")
                     self._set_status("Homebrew install failed — check log.")
                     return
