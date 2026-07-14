@@ -26,13 +26,24 @@ echo ""
 if ! command -v brew &> /dev/null; then
     echo "→ Installing Homebrew..."
     NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-    eval "$(/opt/homebrew/bin/brew shellenv)"
-    echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
+    # Apple Silicon installs to /opt/homebrew, Intel to /usr/local — detect
+    # instead of hardcoding one, or this silently no-ops on the other arch.
+    if [ -x /opt/homebrew/bin/brew ]; then
+        BREW_BIN="/opt/homebrew/bin/brew"
+    elif [ -x /usr/local/bin/brew ]; then
+        BREW_BIN="/usr/local/bin/brew"
+    else
+        BREW_BIN=""
+    fi
+    if [ -n "$BREW_BIN" ]; then
+        eval "$("$BREW_BIN" shellenv)"
+        echo "eval \"\$($BREW_BIN shellenv)\"" >> ~/.zprofile
+    fi
 else
     echo "✓ Homebrew"
 fi
 
-export PATH="/opt/homebrew/bin:$PATH"
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 # ── Tesseract ─────────────────────────────────────────────────────────────────
 if ! command -v tesseract &> /dev/null; then

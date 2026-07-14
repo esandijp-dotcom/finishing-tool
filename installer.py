@@ -206,7 +206,9 @@ class InstallerApp(tk.Tk):
                 py_pkg = os.path.join(tempfile.gettempdir(), "python-3.13.0.pkg")
                 try:
                     self._log("  Downloading Python 3.13 installer (~45MB)...")
-                    urllib.request.urlretrieve(py_pkg_url, py_pkg)
+                    req = urllib.request.urlopen(py_pkg_url, context=ctx_py, timeout=120)
+                    with open(py_pkg, "wb") as f:
+                        f.write(req.read())
                     self._log("  Installing Python 3.13 (requires admin)...")
                     install_py = (f'do shell script "installer -pkg \\"{py_pkg}\\" -target /" '
                                   f'with administrator privileges')
@@ -215,13 +217,11 @@ class InstallerApp(tk.Tk):
                     if r.returncode != 0 or not os.path.exists(python):
                         self._log(f"  ✗ Python install failed: {r.stderr.strip()}")
                         self._set_status("Python 3.13 install failed — check log.")
-                        self.after(0, lambda: self._set_step(0, "error"))
                         return
                     self._log("Python 3.13 installed ✓")
                 except Exception as e:
                     self._log(f"  ✗ Could not install Python 3.13: {e}")
                     self._set_status("Python 3.13 install failed — check log.")
-                    self.after(0, lambda: self._set_step(0, "error"))
                     return
             else:
                 self._log("Python 3.13 found ✓")
@@ -234,8 +234,13 @@ class InstallerApp(tk.Tk):
             if xcode_check.returncode != 0:
                 self._log("Xcode Command Line Tools not found — installing...")
                 self._set_status("Installing Xcode Command Line Tools...")
-                xcode_script = 'do shell script "xcode-select --install" with administrator privileges'
-                subprocess.run(["osascript", "-e", xcode_script], capture_output=True)
+                # No admin privileges needed for this one — it just pops the
+                # Software Update GUI dialog. Routing it through a
+                # privileged osascript shell (like the other pre-flight
+                # installs) risks the dialog failing to display since a
+                # privileged shell doesn't have the user's window-server
+                # session.
+                subprocess.run(["xcode-select", "--install"], capture_output=True)
                 import time
                 # Wait up to 2 min for CLT install
                 for _ in range(24):
@@ -252,9 +257,14 @@ class InstallerApp(tk.Tk):
             # Step 0: Homebrew
             self._set_step(0, "active")
             self._set_status("Checking Homebrew...")
-            brew = (shutil.which("brew") or
-                    "/opt/homebrew/bin/brew" if os.path.exists("/opt/homebrew/bin/brew") else
-                    "/usr/local/bin/brew" if os.path.exists("/usr/local/bin/brew") else None)
+            # Note: `if/else` binds looser than `or` in Python, so a naive
+            # "shutil.which(...) or X if cond else Y" would silently drop
+            # the shutil.which() result whenever cond is False. Mirror the
+            # same explicit path-first pattern used after a fresh install
+            # below instead of chaining `or` with an untested ternary.
+            brew = ("/opt/homebrew/bin/brew" if os.path.exists("/opt/homebrew/bin/brew")
+                    else "/usr/local/bin/brew" if os.path.exists("/usr/local/bin/brew")
+                    else shutil.which("brew"))
             if not brew or not os.path.exists(brew):
                 self._log("Homebrew not found — installing...")
                 self._set_status("Installing Homebrew...")
@@ -294,14 +304,17 @@ class InstallerApp(tk.Tk):
             # Step 1: Tesseract
             self._set_step(1, "active")
             self._set_status("Checking Tesseract...")
-            tess = shutil.which("tesseract") or "/opt/homebrew/bin/tesseract"
-            if not os.path.exists(tess):
+            tess = ("/opt/homebrew/bin/tesseract" if os.path.exists("/opt/homebrew/bin/tesseract")
+                    else "/usr/local/bin/tesseract" if os.path.exists("/usr/local/bin/tesseract")
+                    else shutil.which("tesseract"))
+            if not tess or not os.path.exists(tess):
                 self._log("Installing Tesseract OCR...")
                 r = subprocess.run([brew, "install", "tesseract"],
                                    capture_output=True, text=True, env=env)
                 if r.returncode != 0:
                     self._set_step(1, "error")
                     self._set_status("Tesseract install failed.")
+                    self._log(f"  ✗ {r.stderr.strip()}")
                     return
             else:
                 self._log("Tesseract found ✓")
