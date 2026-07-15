@@ -75,8 +75,13 @@ def _install_distutils_version_shim():
 _install_distutils_version_shim()
 
 # ─── Version & update config ────────────────────────────────────────────────
-VERSION_URL     = "https://raw.githubusercontent.com/esandijp-dotcom/finishing-tool/main/version.json"
-DOWNLOAD_URL    = "https://raw.githubusercontent.com/esandijp-dotcom/finishing-tool/main/main.py"
+GITHUB_BASE     = "https://raw.githubusercontent.com/esandijp-dotcom/finishing-tool/main"
+VERSION_URL     = f"{GITHUB_BASE}/version.json"
+DOWNLOAD_URL    = f"{GITHUB_BASE}/main.py"
+# Re-synced on every update alongside main.py — keep this in sync with
+# installer.py's RENDER_PRESET_FILES list (same files, same source of truth).
+RENDER_PRESET_FILES = ["01_STRINGOUT Render.xml", "02_COLORED VFX 4444 XQ Render.xml",
+                        "03_PREMIERE XML Render.xml"]
 
 def _load_local_version():
     """Read version from version.json next to this script."""
@@ -624,15 +629,13 @@ RENDER_PRESET = "02_COLORED VFX 4444 XQ"
 def find_output_folder(show_code, show_acronym=None, log_callback=None):
     """
     Auto-detect output folder: any mounted volume whose name CONTAINS the
-    show code, searched (up to a bounded depth) for the first folder
-    anywhere inside it with "TO VFX" in its name. Deliberately permissive
-    by request — the show code appearing in the volume name is the only
-    requirement now. Earlier versions also required an exact
-    SHOWCODE_*_EDIT -> *TURNOVER* -> *TO VFX* folder chain, which
-    silently failed to match any structure that didn't follow it exactly
-    — including a volume prefixed with "V-"/"I-" before the show code,
-    the specific bug this was originally built to fix, and any other
-    naming/organization variant a given show happens to use.
+    show code (case-insensitive), then prefer the folder chain
+    *TURNOVER* -> *TO VFX* if a Turnover folder exists, falling back to
+    a full scan for any folder with "TO VFX" in its name if it doesn't
+    (some shows skip the SHOWCODE_*_EDIT/Turnover wrapper entirely and
+    have a TO VFX folder sitting directly on the volume). Preferring the
+    Turnover chain when present avoids matching an unrelated "TO VFX"
+    folder elsewhere on a volume that has more than one.
     show_acronym is accepted but unused — kept for call-site compatibility.
     log_callback, if given, is called with a line for what was searched
     and what matched, so a failed auto-detect is debuggable instead of
@@ -648,35 +651,124 @@ def find_output_folder(show_code, show_acronym=None, log_callback=None):
         _log("Output folder auto-detect: no show code set yet, skipping.")
         return None
 
-    volumes = [v for v in glob.glob("/Volumes/*") if show_code in os.path.basename(v)]
+    volumes = [v for v in glob.glob("/Volumes/*") if show_code.upper() in os.path.basename(v).upper()]
     _log(f"Output folder auto-detect: show code \"{show_code}\" -> "
          f"{len(volumes)} volume(s) matched" + (f" ({', '.join(sorted(volumes))})" if volumes else ""))
     if not volumes:
         return None
 
     MAX_DEPTH = 6
-    for volume in sorted(volumes):
-        base_depth = volume.rstrip(os.sep).count(os.sep)
-        found = False
-        for root, dirs, _files in os.walk(volume):
+
+    def _find_folder(root_dir, needle, max_depth):
+        base_depth = root_dir.rstrip(os.sep).count(os.sep)
+        for root, dirs, _files in os.walk(root_dir):
             depth = root.rstrip(os.sep).count(os.sep) - base_depth
-            if depth >= MAX_DEPTH:
+            if depth >= max_depth:
                 dirs[:] = []
                 continue
-            for d in dirs:
-                if "TO VFX" in d.upper():
-                    found = True
+            for d in sorted(dirs):
+                if needle in d.upper():
                     return os.path.join(root, d)
-        if not found:
-            _log(f"  {volume}: no folder with \"TO VFX\" in its name found "
-                 f"(searched up to {MAX_DEPTH} levels deep).")
+        return None
+
+    for volume in sorted(volumes):
+        turnover = _find_folder(volume, "TURNOVER", MAX_DEPTH)
+        if turnover:
+            to_vfx = _find_folder(turnover, "TO VFX", MAX_DEPTH)
+            if to_vfx:
+                _log(f"  {volume}: found via Turnover -> {os.path.relpath(to_vfx, volume)}")
+                return to_vfx
+            _log(f"  {volume}: found a Turnover folder but no 'TO VFX' folder inside it "
+                 f"— falling back to a full scan of the volume.")
+
+        to_vfx = _find_folder(volume, "TO VFX", MAX_DEPTH)
+        if to_vfx:
+            _log(f"  {volume}: found 'TO VFX' folder at {os.path.relpath(to_vfx, volume)} "
+                 f"(no Turnover folder needed).")
+            return to_vfx
+
+        _log(f"  {volume}: no folder with \"TO VFX\" in its name found "
+             f"(searched up to {MAX_DEPTH} levels deep).")
 
     return None
 
 
+def get_render_codec_description(project, render_format, render_codec_key, log_callback=None):
+    """
+    Resolve a render codec's human-readable description (e.g. "Apple ProRes
+    4444 XQ") from its internal key (e.g. "ap4x") via GetRenderCodecs(format),
+    which returns {description: codec_key}. Falls back to the raw key if no
+    match is found, so a failed lookup is still visible rather than blank.
+    """
+    try:
+        codecs = project.GetRenderCodecs(render_format) or {}
+        for desc, key in codecs.items():
+            if key == render_codec_key:
+                return desc
+    except Exception as e:
+        if log_callback:
+            log_callback(f"  ⚠ Could not resolve codec description: {e}")
+    return render_codec_key or "Unknown"
+
+
+def get_render_preset_tech_info(project, render_preset, render_info=None,
+                                 timeline=None, log_callback=None):
+    """
+    Build the "RESOLUTION / CODEC / FRAMERATE" banner text for the plate list
+    xlsx, pulled live from the render preset actually used for this export —
+    never hardcoded. Resolution and framerate come from render_info, captured
+    from the first real render job DaVinci queued (render_single_clip's
+    capture_info) since that's the ground truth of what the preset rendered
+    at. Codec comes from DaVinci's current format/codec selection right after
+    loading the same preset. Falls back to the timeline's own frame rate if
+    no render job was captured (e.g. nothing was actually rendered).
+    """
+    def _log(msg):
+        if log_callback:
+            log_callback(msg)
+
+    width = height = fps = None
+    if render_info:
+        width = render_info.get("width")
+        height = render_info.get("height")
+        fps = render_info.get("fps")
+
+    if width and height:
+        res_str = f"{int(float(width))}x{int(float(height))}"
+    else:
+        res_str = "Unknown resolution"
+        _log("  ⚠ Could not determine plate resolution from the render preset.")
+
+    if not fps and timeline:
+        try:
+            fps = float(timeline.GetSetting("timelineFrameRate") or 0) or None
+        except Exception:
+            fps = None
+    if fps:
+        fps_str = f"{float(fps):g} fps"
+    else:
+        fps_str = "Unknown framerate"
+        _log("  ⚠ Could not determine framerate from the render preset.")
+
+    codec_str = "Unknown codec"
+    if project and render_preset:
+        try:
+            project.LoadRenderPreset(render_preset)
+            fmt_codec = project.GetCurrentRenderFormatAndCodec() or {}
+            render_format = fmt_codec.get("format", "")
+            codec_key = fmt_codec.get("codec", "")
+            if codec_key:
+                codec_str = get_render_codec_description(project, render_format, codec_key, log_callback)
+        except Exception as e:
+            _log(f"  ⚠ Could not determine codec from the render preset: {e}")
+
+    return f"{res_str} / {codec_str} / {fps_str}"
+
+
 def generate_plate_list_xlsx(export_list, output_dir, show_code, acronym, date_str,
                               shot_map=None, list_folder=None, log_callback=None,
-                              timeline=None, **kwargs):
+                              timeline=None, project=None, render_preset=None,
+                              render_info=None, **kwargs):
     """Generate plate list xlsx using pre-captured screenshots from shot_map."""
     import xlsxwriter, os
 
@@ -689,28 +781,30 @@ def generate_plate_list_xlsx(export_list, output_dir, show_code, acronym, date_s
     filename = f"{show_code}_{acronym}_VFX_LIST TO POST_{date_str}.xlsx"
     out_path = os.path.join(list_folder, filename)
 
+    tech_info_text = get_render_preset_tech_info(
+        project, render_preset, render_info=render_info,
+        timeline=timeline, log_callback=log_callback
+    )
+
     # FPS and start TC for timecode display
     fps = 24.0
     start_tc_offset = "00:00:00:00"
+    timeline_start_frame = 0
     if timeline:
         try:
             fps = float(timeline.GetSetting("timelineFrameRate") or 24)
             start_tc_offset = timeline.GetStartTimecode() or "00:00:00:00"
+            timeline_start_frame = timeline.GetStartFrame() or 0
         except Exception:
             pass
 
+    # Reuse frames_to_davinci_tc (already proven correct elsewhere in this
+    # file) instead of a separate ad-hoc conversion — the previous local
+    # version here computed a start-timecode offset but never applied it,
+    # and used int(fps) (truncating, e.g. 23.976 -> 23) instead of a
+    # rounded nominal rate (-> 24), both of which produced wrong timecodes.
     def frames_to_tc(frame_num):
-        try:
-            parts = start_tc_offset.split(":")
-            offset = (int(parts[0])*3600 + int(parts[1])*60 + int(parts[2])) * int(fps) + int(parts[3])
-            total = frame_num
-        except Exception:
-            total = frame_num
-        fi = int(fps)
-        ff = total % fi; total //= fi
-        ss = total % 60; total //= 60
-        mm = total % 60; hh = total // 60
-        return f"{hh:02d}:{mm:02d}:{ss:02d}:{ff:02d}"
+        return frames_to_davinci_tc(frame_num, fps, timeline_start_frame, start_tc_offset)
 
     # Group export_list: one row per unique plate (V# layers share same start/end)
     seen = {}
@@ -743,20 +837,31 @@ def generate_plate_list_xlsx(export_list, output_dir, show_code, acronym, date_s
         'text_wrap': True,
         'border': 1, 'border_color': '#333333'
     })
+    tech_info_fmt = wb.add_format({
+        'bold': True, 'font_name': 'Arial', 'font_size': 10,
+        'font_color': '#E8A838', 'bg_color': '#2A2A2A',
+        'align': 'center', 'valign': 'vcenter',
+        'border': 1, 'border_color': '#333333'
+    })
 
     columns   = ["FILE NAME", "EPISODE", "PLATES TO TURNOVER",
                  "VFX REF TIMECODE_IN", "VFX REF TIMECODE_OUT",
                  "TURNOVER STATUS", "TURNOVER NOTE", "VFX", "VFX NOTE", "SCREENSHOT"]
     col_widths = [45, 12, 20, 22, 22, 18, 20, 12, 20, 25]
 
-    # Header row
-    for col_idx, (col_name, col_w) in enumerate(zip(columns, col_widths)):
-        ws.write(0, col_idx, col_name, header_fmt)
-        ws.set_column(col_idx, col_idx, col_w)
+    # Row 0: merged banner with resolution / codec / framerate for the whole
+    # export (constant across every plate, so one row beats repeating it).
+    ws.merge_range(0, 0, 0, len(columns) - 1, tech_info_text, tech_info_fmt)
     ws.set_row(0, 18)
 
-    # Data rows
-    for row_idx, plate_data in enumerate(unique_plates, 1):
+    # Row 1: header row
+    for col_idx, (col_name, col_w) in enumerate(zip(columns, col_widths)):
+        ws.write(1, col_idx, col_name, header_fmt)
+        ws.set_column(col_idx, col_idx, col_w)
+    ws.set_row(1, 18)
+
+    # Data rows, starting at row 2 (below the banner + header)
+    for row_idx, plate_data in enumerate(unique_plates, 2):
         item   = plate_data["item"]
         layers = plate_data["layers"]
 
@@ -801,7 +906,7 @@ def generate_plate_list_xlsx(export_list, output_dir, show_code, acronym, date_s
                         log_callback(f"  ⚠ Screenshot embed failed: {e}")
 
         if log_callback:
-            log_callback(f"  [{row_idx}/{len(unique_plates)}] {item['filename']}")
+            log_callback(f"  [{row_idx - 1}/{len(unique_plates)}] {item['filename']}")
 
     wb.close()
 
@@ -812,8 +917,14 @@ def generate_plate_list_xlsx(export_list, output_dir, show_code, acronym, date_s
 
 
 def render_single_clip(project, timeline, render_preset,
-                       output_path, filename, mark_in, mark_out, log_callback=None):
-    """Render one clip — tracks must already be set correctly before calling."""
+                       output_path, filename, mark_in, mark_out, log_callback=None,
+                       capture_info=None):
+    """Render one clip — tracks must already be set correctly before calling.
+    If capture_info is an empty dict, it's filled once (from the first clip's
+    render job) with the actual width/height/fps the loaded preset rendered
+    at — used later to report real preset info in the plate list xlsx instead
+    of guessing at it independently.
+    """
     project.LoadRenderPreset(render_preset)
     project.SetRenderSettings({
         "SelectAllFrames": False,
@@ -834,11 +945,16 @@ def render_single_clip(project, timeline, render_preset,
             log_callback(f"    Failed to add render job for {filename}")
         return False
 
-    if log_callback:
-        jobs = project.GetRenderJobList()
-        for job in jobs:
-            if job.get("JobId") == job_id:
+    jobs = project.GetRenderJobList()
+    for job in jobs:
+        if job.get("JobId") == job_id:
+            if log_callback:
                 log_callback(f"    MarkIn={job.get('MarkIn')}, MarkOut={job.get('MarkOut')}")
+            if capture_info is not None and not capture_info:
+                capture_info["width"] = job.get("FormatWidth")
+                capture_info["height"] = job.get("FormatHeight")
+                capture_info["fps"] = job.get("FrameRate")
+            break
 
     project.StartRendering(job_id)
 
@@ -874,6 +990,7 @@ class ExportEngine:
         self.timeline = None
         self.episode_markers = []
         self.export_list = []
+        self.render_info = {}
 
     def connect(self):
         self.log("Connecting to DaVinci Resolve...")
@@ -1132,7 +1249,8 @@ class ExportEngine:
                     filename=item["filename"],
                     mark_in=item["start_frame"],
                     mark_out=item["end_frame"] - 1,
-                    log_callback=self.log
+                    log_callback=self.log,
+                    capture_info=self.render_info
                 )
 
                 if not success:
@@ -6897,6 +7015,8 @@ class VFXExporterApp(tk.Tk):
                         _acr = self.show_acronym.get().strip() or "ACRN"
                         _date = self.export_date.get().strip() or datetime.now().strftime("%y%m%d")
                         _tl = self.engine.timeline
+                        _proj = self.engine.project
+                        _render_info = dict(self.engine.render_info)
                         _lf = _list_folder
                         _sm = dict(_shot_map)
                         def _safe_log(msg, tag="muted"):
@@ -6912,6 +7032,9 @@ class VFXExporterApp(tk.Tk):
                                     shot_map=_sm,
                                     list_folder=_lf,
                                     timeline=_tl,
+                                    project=_proj,
+                                    render_preset=RENDER_PRESET,
+                                    render_info=_render_info,
                                     log_callback=_safe_log
                                 )
                                 _safe_log(f"✓ Plate list saved: {result}", "success")
@@ -7623,6 +7746,57 @@ class VFXExporterApp(tk.Tk):
                 self.resizable(False, False)
             self.after(50, _update_banner_resize_retry)
 
+    def _update_render_presets(self, ctx):
+        """
+        Re-download and re-install the DaVinci render presets alongside a
+        main.py update — the auto-updater otherwise only ever touches
+        main.py itself, so a fix to these preset files (e.g. installer.py's
+        copy logic, or the presets themselves) never reaches machines that
+        already ran the installer once. Mirrors installer.py's per-file
+        copy + size verification so a single failed file doesn't skip the
+        rest. Logs a restart reminder if Resolve is currently running,
+        since it only reads this folder on launch.
+        """
+        import urllib.request, urllib.parse
+        resolve_presets_dir = os.path.expanduser(
+            "~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Presets/Render")
+        try:
+            os.makedirs(resolve_presets_dir, exist_ok=True)
+        except Exception as e:
+            self._log(f"⚠ Could not create DaVinci render presets folder: {e}", "warn")
+            return
+
+        failures = []
+        for fname in RENDER_PRESET_FILES:
+            url = f"{GITHUB_BASE}/{urllib.parse.quote(fname)}"
+            dst = os.path.join(resolve_presets_dir, fname)
+            try:
+                req = urllib.request.urlopen(url, context=ctx, timeout=30)
+                data = req.read()
+                if not data:
+                    raise IOError("downloaded file was empty")
+                with open(dst, "wb") as f:
+                    f.write(data)
+                self._log(f"  ✓ {fname}", "muted")
+            except Exception as e:
+                failures.append(fname)
+                self._log(f"  ✗ {fname}: {e}", "warn")
+
+        if failures:
+            self._log(f"⚠ {len(failures)} DaVinci render preset(s) failed to update: "
+                       f"{', '.join(failures)}", "warn")
+        else:
+            self._log("✓ DaVinci render presets updated.", "success")
+
+        try:
+            running = subprocess.run(["pgrep", "-f", "DaVinci Resolve"],
+                                      capture_output=True).returncode == 0
+        except Exception:
+            running = False
+        if running:
+            self._log("  DaVinci Resolve is running — restart it so it picks up "
+                       "the updated presets (it only reads this folder on launch).", "warn")
+
     def _do_update(self, remote_version, download_url):
         import urllib.request, ssl
         self._log(f"Downloading v{remote_version}...", "muted")
@@ -7644,6 +7818,9 @@ class VFXExporterApp(tk.Tk):
             req = urllib.request.urlopen(download_url, context=ctx, timeout=30)
             with open(script_path, "wb") as f:
                 f.write(req.read())
+
+            self._update_render_presets(ctx)
+
             self._log(f"✓ Updated to v{remote_version}. Restarting...", "success")
             # Find the .app bundle by walking up from script_path
             path = os.path.abspath(script_path)
@@ -8112,9 +8289,11 @@ class VFXExporterApp(tk.Tk):
         _section_hdr(sec, "FOLDER STRUCTURE")
         _step(sec, 1, "Volume & folder match",
               "The app scans any mounted volume whose name contains your "
-              "show code, then looks inside it (up to 6 folders deep) for "
-              "the first folder with 'TO VFX' in its name:")
-        _code(sec, "/Volumes/*SHOWCODE*/\n\u2192 ... (any depth, up to 6)\n\u2192 folder with 'TO VFX' in name")
+              "show code, then prefers a Turnover \u2192 TO VFX folder chain "
+              "(up to 6 folders deep each). If there's no Turnover folder, "
+              "it falls back to scanning the whole volume for any folder "
+              "with 'TO VFX' in its name \u2014 no SHOWCODE_EDIT wrapper required:")
+        _code(sec, "/Volumes/*SHOWCODE*/\n\u2192 ... (any depth, up to 6)\n\u2192 folder with 'TURNOVER' in name\n\u2192 ... (any depth, up to 6)\n\u2192 folder with 'TO VFX' in name\n\n(or, if no Turnover folder exists, any 'TO VFX' folder\nfound anywhere on the volume)")
         _step(sec, 2, "What gets created",
               "Inside TO VFX, the app creates one subfolder per episode plus a "
               "LIST TO POST folder containing the .xlsx document and screenshots.")
