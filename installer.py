@@ -418,17 +418,40 @@ class InstallerApp(tk.Tk):
             # folder here — Resolve doesn't need to be running, and this is
             # non-fatal if the folder can't be created (e.g. Resolve isn't
             # installed on this machine at all; the VFX tab just won't work).
+            # Each file is copied and verified independently — previously
+            # this was one try/except around the whole loop, so if the
+            # FIRST file failed (permissions, a locked file, etc.) the
+            # exception aborted the loop and silently skipped the rest,
+            # with only one easy-to-miss warning logged for it.
             self._set_status("Installing DaVinci render presets...")
             resolve_presets_dir = os.path.expanduser(
                 "~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Presets/Render")
+            preset_failures = []
             try:
                 os.makedirs(resolve_presets_dir, exist_ok=True)
-                for fname in RENDER_PRESET_FILES:
-                    shutil.copy(os.path.join(build_dir, fname),
-                                os.path.join(resolve_presets_dir, fname))
-                self._log("DaVinci render presets installed ✓")
             except Exception as e:
-                self._log(f"⚠ Could not install DaVinci render presets: {e}")
+                self._log(f"⚠ Could not create DaVinci render presets folder: {e}")
+                preset_failures = list(RENDER_PRESET_FILES)
+            else:
+                for fname in RENDER_PRESET_FILES:
+                    src = os.path.join(build_dir, fname)
+                    dst = os.path.join(resolve_presets_dir, fname)
+                    try:
+                        shutil.copy(src, dst)
+                        if os.path.getsize(dst) != os.path.getsize(src):
+                            raise IOError("copied file size does not match source")
+                        self._log(f"  ✓ {fname}")
+                    except Exception as e:
+                        preset_failures.append(fname)
+                        self._log(f"  ✗ {fname}: {e}")
+
+            if preset_failures:
+                self._log(f"⚠ {len(preset_failures)} DaVinci render preset(s) failed to install: "
+                           f"{', '.join(preset_failures)}")
+            else:
+                self._log("DaVinci render presets installed ✓")
+                self._log("  Note: if DaVinci Resolve is already open, restart it so it "
+                           "picks up the new presets — it only reads this folder on launch.")
 
             self._set_step(2, "done")
             self._set_progress(3/total)
@@ -477,7 +500,10 @@ class InstallerApp(tk.Tk):
             self._log("Finishing Tool installed ✓")
             self._set_step(3, "done")
             self._set_progress(1.0)
-            self._set_status("Installation complete!")
+            if preset_failures:
+                self._set_status(f"Installed, but {len(preset_failures)} DaVinci render preset(s) failed — see log.")
+            else:
+                self._set_status("Installation complete!")
             self.after(0, self._show_done)
 
         except Exception as e:
