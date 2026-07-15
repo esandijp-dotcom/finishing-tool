@@ -440,105 +440,118 @@ class VFXPlate:
 
 def get_vfx_plates(timeline):
     """
-    Collect all orange/apricot clips from all tracks (2+).
-    Group overlapping clips into plates.
-    The lowest-track clip in each group is the anchor.
+    Collect all orange/apricot clips from all tracks (2+) and group them
+    into plates by TIME OVERLAP across tracks, transitively — any two
+    clips on different tracks whose frame ranges genuinely overlap belong
+    to the same plate, connected-component style via union-find. This is
+    deliberately overlap-based rather than requiring one clip to be fully
+    CONTAINED inside another: a clip that runs a few frames past its
+    neighbor no longer gets silently kicked out into its own separate
+    plate, and it works symmetrically regardless of which track has the
+    single clip vs. the split ones (e.g. one clip on V2 spanning two
+    separate clips on V1 groups exactly the same way as the reverse).
+
+    Within a group, clips are ordered by track index (ascending) then by
+    start frame, and layer numbers (V1, V2, ...) follow that order — so
+    the lowest track in a group is always V1, matching prior behavior.
+    Apricot clips are always the "CLEAN" layer regardless of track.
+    Multiple orange clips sharing one track within a group get a
+    sub_index (_01, _02, ...) to disambiguate their filenames.
     """
     track_count = get_track_count(timeline, "video")
 
-    # Collect all orange clips from all tracks
-    clips_by_track = {}
+    all_clips = []
     for track_idx in range(2, track_count + 1):
-        clips = get_all_clips_on_track(timeline, "video", track_idx)
-        vfx = [c for c in clips if is_clip_orange(c) and is_clip_enabled(c)]
-        if vfx:
-            clips_by_track[track_idx] = sorted(vfx, key=lambda c: get_clip_start_frame(c))
+        for c in get_all_clips_on_track(timeline, "video", track_idx):
+            if is_clip_orange(c) and is_clip_enabled(c):
+                all_clips.append({
+                    "track": track_idx, "clip": c,
+                    "start": get_clip_start_frame(c),
+                    "end": get_clip_end_frame(c),
+                })
 
-    if not clips_by_track:
+    if not all_clips:
         return []
 
-    # Build a flat list of all clips with their track
-    all_clips = []
-    for track_idx in sorted(clips_by_track.keys()):
-        for clip in clips_by_track[track_idx]:
-            all_clips.append((track_idx, clip))
-    all_clips.sort(key=lambda x: (get_clip_start_frame(x[1]), x[0]))
+    all_clips.sort(key=lambda c: (c["start"], c["track"]))
 
-    # Group clips that overlap in time into plates
-    # Anchor = lowest-track clip; all others are layers above it
+    # Union-find over all clips — union any pair (necessarily on different
+    # tracks, since one track can't have two clips at the same time) whose
+    # frame ranges genuinely overlap.
+    n = len(all_clips)
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if all_clips[j]["start"] >= all_clips[i]["end"]:
+                break  # sorted by start — no later clip can overlap clip i
+            if all_clips[j]["start"] < all_clips[i]["end"] and all_clips[i]["start"] < all_clips[j]["end"]:
+                union(i, j)
+
+    groups = defaultdict(list)
+    for idx in range(n):
+        groups[find(idx)].append(all_clips[idx])
+
     plates = []
-    used = set()
+    for group in groups.values():
+        group.sort(key=lambda c: (c["track"], c["start"]))
+        g_start = min(c["start"] for c in group)
+        g_end = max(c["end"] for c in group)
+        plate = VFXPlate(anchor_clip=group[0]["clip"], start_frame=g_start, end_frame=g_end)
 
-    for i, (anchor_track, anchor_clip) in enumerate(all_clips):
-        if id(anchor_clip) in used:
+        if len(group) == 1:
+            plates.append(plate)
             continue
-        used.add(id(anchor_clip))
 
-        a_start = get_clip_start_frame(anchor_clip)
-        a_end = get_clip_end_frame(anchor_clip)
-        plate = VFXPlate(anchor_clip=anchor_clip,
-                         start_frame=a_start, end_frame=a_end)
+        total_orange = sum(1 for c in group if not is_clip_apricot(c["clip"]))
+        use_v_numbers = total_orange >= 2
 
-        # Find all clips on higher tracks that overlap with this anchor
-        overlapping = []
-        for track_idx, clip in all_clips:
-            if id(clip) in used:
-                continue
-            if track_idx <= anchor_track:
-                continue
-            cs = get_clip_start_frame(clip)
-            ce = get_clip_end_frame(clip)
-            if cs >= a_start and ce <= a_end:
-                overlapping.append((track_idx, clip))
-                used.add(id(clip))
+        clips_by_track = defaultdict(list)
+        for c in group:
+            clips_by_track[c["track"]].append(c)
 
-        if overlapping:
-            # Count total orange (non-apricot) clips in this stack
-            all_in_stack = [(anchor_track, anchor_clip)] + overlapping
-            total_orange = sum(1 for _, c in all_in_stack if not is_clip_apricot(c))
-            use_v_numbers = total_orange >= 2
-            orange_counter = 0
-
-            # Add anchor as first layer
-            if is_clip_apricot(anchor_clip):
-                plate.layers.append(PlateLayer(
-                    clip=anchor_clip, track_index=anchor_track,
-                    start_frame=a_start, end_frame=a_end,
-                    layer_number=0, sub_index=None
-                ))
-            else:
+        # Layer number is per TRACK, not per clip — a track that has two
+        # split clips is still one "layer tier" (e.g. both V1), just with
+        # a sub_index to tell the two pieces apart. Incrementing the
+        # counter per clip instead (the original bug) meant a split V2
+        # would come out as V2 + V3 instead of V2 + V2.
+        orange_counter = 0
+        for track_idx in sorted(clips_by_track.keys()):
+            clips_on_track = clips_by_track[track_idx]
+            orange_clips_on_track = [c for c in clips_on_track if not is_clip_apricot(c["clip"])]
+            track_layer_number = None
+            if orange_clips_on_track:
                 orange_counter += 1
-                plate.layers.append(PlateLayer(
-                    clip=anchor_clip, track_index=anchor_track,
-                    start_frame=a_start, end_frame=a_end,
-                    layer_number=orange_counter if use_v_numbers else -1,
-                    sub_index=None
-                ))
+                track_layer_number = orange_counter if use_v_numbers else -1
 
-            # Add overlapping clips as layers, grouped by track
-            track_clips = defaultdict(list)
-            for track_idx, c in overlapping:
-                track_clips[track_idx].append(c)
-
-            for track_idx in sorted(track_clips.keys()):
-                clips_on_track = track_clips[track_idx]
-                for clip in clips_on_track:
-                    if is_clip_apricot(clip):
-                        plate.layers.append(PlateLayer(
-                            clip=clip, track_index=track_idx,
-                            start_frame=get_clip_start_frame(clip),
-                            end_frame=get_clip_end_frame(clip),
-                            layer_number=0, sub_index=None
-                        ))
-                    else:
-                        orange_counter += 1
-                        plate.layers.append(PlateLayer(
-                            clip=clip, track_index=track_idx,
-                            start_frame=get_clip_start_frame(clip),
-                            end_frame=get_clip_end_frame(clip),
-                            layer_number=orange_counter if use_v_numbers else -1,
-                            sub_index=clips_on_track.index(clip) + 1 if len(clips_on_track) > 1 else None
-                        ))
+            orange_idx = 0
+            for c in clips_on_track:
+                clip = c["clip"]
+                if is_clip_apricot(clip):
+                    plate.layers.append(PlateLayer(
+                        clip=clip, track_index=track_idx,
+                        start_frame=c["start"], end_frame=c["end"],
+                        layer_number=0, sub_index=None
+                    ))
+                else:
+                    orange_idx += 1
+                    plate.layers.append(PlateLayer(
+                        clip=clip, track_index=track_idx,
+                        start_frame=c["start"], end_frame=c["end"],
+                        layer_number=track_layer_number,
+                        sub_index=orange_idx if len(orange_clips_on_track) > 1 else None
+                    ))
 
         plates.append(plate)
 
@@ -549,19 +562,22 @@ def assign_episodes(plates, episode_markers):
     if not episode_markers:
         for plate in plates:
             plate.episode_code = "EP00"
-        return
+    else:
+        # Sort markers by frame number to ensure correct order
+        sorted_markers = sorted(episode_markers, key=lambda m: m.frame_number)
 
-    # Sort markers by frame number to ensure correct order
-    sorted_markers = sorted(episode_markers, key=lambda m: m.frame_number)
+        for plate in plates:
+            assigned = sorted_markers[0].episode_code
+            for marker in sorted_markers:
+                if plate.start_frame >= marker.frame_number:
+                    assigned = marker.episode_code
+                # Don't break early - check all markers to find the last one that applies
+            plate.episode_code = assigned
 
-    for plate in plates:
-        assigned = sorted_markers[0].episode_code
-        for marker in sorted_markers:
-            if plate.start_frame >= marker.frame_number:
-                assigned = marker.episode_code
-            # Don't break early - check all markers to find the last one that applies
-        plate.episode_code = assigned
-
+    # Plate numbering must run regardless of whether real episode markers
+    # were found — this used to sit only in the "markers found" branch, so
+    # the no-markers/EP00 fallback returned early and skipped it, leaving
+    # every plate's number at the VFXPlate dataclass default of 0.
     counters = {}
     for plate in sorted(plates, key=lambda p: p.start_frame):
         ep = plate.episode_code
@@ -806,15 +822,33 @@ def generate_plate_list_xlsx(export_list, output_dir, show_code, acronym, date_s
     def frames_to_tc(frame_num):
         return frames_to_davinci_tc(frame_num, fps, timeline_start_frame, start_tc_offset)
 
-    # Group export_list: one row per unique plate (V# layers share same start/end)
-    seen = {}
+    # Group export_list: one row per plate. Grouping by (episode_code,
+    # plate_number) rather than matching start/end frames — since plates
+    # can now group clips that don't all share identical start/end frames
+    # (e.g. a track split into two clips under one whole clip on another
+    # track), every item that belongs to the same VFXPlate always shares
+    # the same episode_code + plate_number (see get_export_list), which
+    # frame-range matching can't guarantee.
+    groups = {}
     for item in export_list:
-        key = (item["episode_code"], item["start_frame"], item["end_frame"])
-        if key not in seen:
-            seen[key] = {"item": item, "layers": 1}
-        else:
-            seen[key]["layers"] += 1
-    unique_plates = sorted(seen.values(), key=lambda x: x["item"]["start_frame"])
+        key = (item["episode_code"], item["plate_number"])
+        groups.setdefault(key, []).append(item)
+
+    unique_plates = []
+    for items in groups.values():
+        g_start = min(i["start_frame"] for i in items)
+        g_end = max(i["end_frame"] for i in items)
+        # Representative row: prefer whichever clip spans the plate's full
+        # range (the "anchor" — most representative single filename for
+        # the group), falling back to the lowest-track clip if no single
+        # clip spans the whole thing.
+        full_span = [i for i in items if i["start_frame"] == g_start and i["end_frame"] == g_end]
+        rep = min(full_span or items, key=lambda i: i["track_index"])
+        unique_plates.append({
+            "item": {**rep, "start_frame": g_start, "end_frame": g_end},
+            "layers": len(items),
+        })
+    unique_plates.sort(key=lambda x: x["item"]["start_frame"])
 
     CELL_H_PX = 190
     ROW_H_PT  = CELL_H_PX * 72 / 96
