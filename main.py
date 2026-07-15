@@ -7579,7 +7579,15 @@ class VFXExporterApp(tk.Tk):
             return b
 
         # ✕ on the left
-        _make_banner_btn(banner, "✕", banner.destroy).pack(side="left", padx=(8, 4), pady=4)
+        def _dismiss_banner():
+            banner.destroy()
+            # Same resize-locking issue in reverse — removing the banner
+            # doesn't shrink the window back down on its own either.
+            self.update_idletasks()
+            self.resizable(False, True)
+            self.geometry(f"{APP_WIDTH}x{self.winfo_reqheight()}")
+            self.resizable(False, False)
+        _make_banner_btn(banner, "✕", _dismiss_banner).pack(side="left", padx=(8, 4), pady=4)
 
         # Message text
         tk.Label(banner, text=f"✦ Version {remote_version} available — {notes}",
@@ -7589,6 +7597,31 @@ class VFXExporterApp(tk.Tk):
         # UPDATE NOW on the right
         _make_banner_btn(banner, "UPDATE NOW", lambda: self._do_update(remote_version, download_url)
                          ).pack(side="right", padx=(4, 8), pady=4)
+
+        # Window is locked resizable(False, False) — packing this banner
+        # in doesn't grow the window to reveal it on its own; only
+        # something that explicitly re-triggers the resize dance (like
+        # switching tabs) does, which is why the banner used to only
+        # become visible after a tab switch. Same fix as _switch_tab's:
+        # unlock, apply, relock, with a deferred retry for large jumps
+        # (a single pass doesn't reliably apply on macOS).
+        self.update_idletasks()
+        self.resizable(False, True)
+        target_height = self.winfo_reqheight()
+        self.geometry(f"{APP_WIDTH}x{target_height}")
+        self.resizable(False, False)
+        self.update_idletasks()
+        if (abs(self.winfo_height() - target_height) > 4
+                and not getattr(self, "_update_banner_resize_retry_pending", False)):
+            self._update_banner_resize_retry_pending = True
+
+            def _update_banner_resize_retry():
+                self._update_banner_resize_retry_pending = False
+                self.update_idletasks()
+                self.resizable(False, True)
+                self.geometry(f"{APP_WIDTH}x{self.winfo_reqheight()}")
+                self.resizable(False, False)
+            self.after(50, _update_banner_resize_retry)
 
     def _do_update(self, remote_version, download_url):
         import urllib.request, ssl
