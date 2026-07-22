@@ -1,5 +1,5 @@
 {
-  "version": "1.0.4",
-  "release_notes": "Initial Release.",
+  "version": "1.0.5",
+  "release_notes": "Fixed black frame at the beginning of nested episodes. Added collapsable information boxes and scrollbar for small displays. UI improvements.",
   "download_url": "https://raw.githubusercontent.com/esandijp-dotcom/finishing-tool/main/main.py"
 }

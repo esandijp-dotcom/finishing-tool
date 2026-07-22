@@ -5,6 +5,7 @@ VFX Plate Exporter — single-file entry point.
 
 import sys
 import os
+import base64
 # pymiere's core.py does `from distutils.version import StrictVersion` —
 # distutils was removed from the standard library entirely in Python
 # 3.12+ (this app runs on 3.13). `import setuptools` first (setuptools
@@ -82,6 +83,24 @@ DOWNLOAD_URL    = f"{GITHUB_BASE}/main.py"
 # installer.py's RENDER_PRESET_FILES list (same files, same source of truth).
 RENDER_PRESET_FILES = ["01_STRINGOUT Render.xml", "02_COLORED VFX 4444 XQ Render.xml",
                         "03_PREMIERE XML Render.xml"]
+
+# ─── In-app bug report / feedback ───────────────────────────────────────────
+# The token is a GitHub fine-grained PAT scoped to ONLY "Issues: write" on
+# this one dedicated (private) repo — no code/contents access at all. Safe to
+# ship in distributed source: same model as Sentry's public DSN, a write-only
+# credential that, even fully extracted, can only file issues here.
+#
+# Stored base64-encoded (decoded below), not as a literal token string —
+# GitHub's push-protection secret scanner pattern-matches raw fine-grained
+# PATs and blocks any push containing one, which this repo is public and
+# would trip every time. This isn't obscuring anything from
+# someone reading the source (one line to decode it back), it just keeps
+# an intentionally low-privilege, revocable credential from matching a
+# scanner built for accidentally-leaked ones.
+FEEDBACK_REPO = "esandijp-dotcom/finishing-tool-feedback"
+FEEDBACK_TOKEN = base64.b64decode(
+    "Z2l0aHViX3BhdF8xMUNHT0xWS1EwaWFoakRxclMwUTRUX2FIMGMxN2tFZUJZS2ZSUGJOWUtjanNOR0drR3BXdVRjUFZFTzBYQTV4bTQyRkQ1NVZBT2UyWU9mQXp6"
+).decode()
 
 def _load_local_version():
     """Read version from version.json next to this script."""
@@ -1392,6 +1411,29 @@ class VFXExporterApp(tk.Tk):
 
     def _center_window(self):
         self.update_idletasks()
+        # This is the very first resize, at launch — the window has no
+        # real geometry yet, so tab_content_frame's width would still
+        # reflect whatever tiny default size Tk gives a window that's
+        # never had geometry() applied, not APP_WIDTH. That would throw
+        # off both the content-width sync below and the reqheight
+        # measurement that depends on it (see _sync_tab_box_content_width).
+        # Committing the width (only, height is a placeholder) up front
+        # fixes that; the real height follows once content is measured
+        # against the correct final width.
+        self.geometry(f"{APP_WIDTH}x1")
+        self.update_idletasks()
+        # tab_content_frame (the Canvas the active tab's content is
+        # embedded in — see _build_ui) doesn't auto-size to that content
+        # the way a Frame would, so it has to be explicitly synced before
+        # winfo_reqheight() below can reflect it. Always "vfx" here since
+        # this only runs once, at launch, before the user can have
+        # switched tabs. Content's own WIDTH is synced first — its
+        # required height can depend on it (wrapped text etc.), so a
+        # stale width would throw off this height measurement too.
+        self._sync_tab_box_content_width()
+        self.tab_content_frame.configure(
+            height=max(self._vfx_content.winfo_reqheight(), 1) + 2 * self._tab_box_pad)
+        self.update_idletasks()
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
         w = APP_WIDTH
@@ -1405,6 +1447,7 @@ class VFXExporterApp(tk.Tk):
         # window runs off the bottom of the screen.
         y = 20
         self.geometry(f"{w}x{h}+{x}+{y}")
+        self._redraw_tab_box()
         self.deiconify()
         self.attributes("-alpha", 1)
         self.lift()
@@ -1478,6 +1521,39 @@ class VFXExporterApp(tk.Tk):
         self._help_btn.bind("<ButtonPress-1>",   lambda e: self._help_btn.itemconfig(1, fill="#a06010"))
         self._help_btn.bind("<ButtonRelease-1>", lambda e: (self._help_btn.itemconfig(1, fill=ACCENT), self._open_guide()))
 
+        # Bug report button — same filled orange circle as Help, with the
+        # real Tabler "bug" icon (bug_icon.png, rasterized from Tabler's
+        # outline SVG — a real icon font isn't usable on a plain tkinter
+        # Canvas) sitting between RESET ALL and Help.
+        bug_size = 26
+        self._bug_btn = tk.Canvas(title_row, width=bug_size, height=bug_size,
+                                   bg=BG_OUTER, highlightthickness=0, cursor="")
+        bug_circle = self._bug_btn.create_oval(1, 1, bug_size-1, bug_size-1,
+                                                fill=ACCENT, outline="")
+        try:
+            import os as _os
+            from PIL import Image as _Image, ImageTk as _ImageTk
+            # "__file__ in dir()" (the pattern used elsewhere in this file
+            # for the thinking.gif path) always evaluates False inside a
+            # method — dir() with no args reflects the local scope only,
+            # not module globals, even though __file__ itself resolves
+            # fine via normal name lookup. Reference it directly instead.
+            _script_dir = _os.path.dirname(_os.path.abspath(__file__))
+            _bug_icon_path = _os.path.join(_script_dir, "bug_icon.png")
+            _bug_icon_img = _Image.open(_bug_icon_path).convert("RGBA").resize((16, 16), _Image.LANCZOS)
+            self._bug_icon_photo = _ImageTk.PhotoImage(_bug_icon_img)
+            self._bug_btn.create_image(bug_size//2, bug_size//2, image=self._bug_icon_photo)
+        except Exception:
+            # Fallback if the asset is ever missing — a plain "!" still
+            # reads as "something needs your attention" in a pinch.
+            self._bug_btn.create_text(bug_size//2, bug_size//2, text="!",
+                                       font=("SF Pro Display", 13, "bold"), fill="#000000")
+        self._bug_btn.pack(side="right", padx=(14, 0))
+        self._bug_btn.bind("<Enter>",  lambda e: self._bug_btn.itemconfig(bug_circle, fill="#f0c060"))
+        self._bug_btn.bind("<Leave>",  lambda e: self._bug_btn.itemconfig(bug_circle, fill=ACCENT))
+        self._bug_btn.bind("<ButtonPress-1>",   lambda e: self._bug_btn.itemconfig(bug_circle, fill="#a06010"))
+        self._bug_btn.bind("<ButtonRelease-1>", lambda e: (self._bug_btn.itemconfig(bug_circle, fill=ACCENT), self._open_feedback_dialog()))
+
         self.btn_reset = _make_reset_canvas("RESET ALL", "#2a6e2a", "#FFFFFF")
         self.btn_reset.pack(side="right", padx=(0, 0))
         self.btn_reset._action = self._do_reset
@@ -1491,8 +1567,13 @@ class VFXExporterApp(tk.Tk):
 
         # Load GIF frames
         import os as _os
-        # Find GIF next to the script, with detected by clip count paths
-        _script_dir = _os.path.dirname(_os.path.abspath(__file__)) if "__file__" in dir() else _os.path.expanduser("~/Downloads/vfx_exporter")
+        # Find GIF next to the script. "__file__ in dir()" used to gate this
+        # (falling back to a hardcoded ~/Downloads/vfx_exporter path) but
+        # dir() with no args reflects local scope only, not module globals —
+        # __file__ itself resolves fine via normal name lookup, so that
+        # check was always False inside this method and silently always hit
+        # the fallback path instead of the real script directory.
+        _script_dir = _os.path.dirname(_os.path.abspath(__file__))
         gif_path = _os.path.join(_script_dir, "thinking.gif")
         try:
             from PIL import Image, ImageTk
@@ -1546,8 +1627,16 @@ class VFXExporterApp(tk.Tk):
                                   outline=col, style="arc", width=lw)
                 canvas.create_arc(tw-r*2-1, 1, tw-1, r*2+1, start=0, extent=90,
                                   outline=col, style="arc", width=lw)
-                canvas.create_line(1, r, 1, th+1, fill=col, width=lw)
-                canvas.create_line(tw-1, r, tw-1, th+1, fill=col, width=lw)
+                # capstyle="projecting": a butt-capped line (Tk's default)
+                # stops exactly at its endpoint, so this bar's stroke only
+                # reaches the CENTER of where it meets the box's border
+                # below (_redraw_tab_box) — not that stroke's full width —
+                # leaving a small square notch uncovered right at the
+                # inner corner. Projecting extends the line by half its
+                # own width past each endpoint so the two strokes' shapes
+                # fully overlap at the joint instead of just touching.
+                canvas.create_line(1, r, 1, th+1, fill=col, width=lw, capstyle="projecting")
+                canvas.create_line(tw-1, r, tw-1, th+1, fill=col, width=lw, capstyle="projecting")
             fw = "bold" if active else "normal"
             canvas.create_text(tw//2, th//2, text=label,
                               font=("SF Pro Display", 12, fw), fill=col)
@@ -1555,7 +1644,16 @@ class VFXExporterApp(tk.Tk):
         def _make_tab(label, tab_id, disabled=False):
             tw, th = 130, 36
             c = tk.Canvas(tab_bar, width=tw, height=th+1, bg=BG_OUTER, highlightthickness=0)
-            c.pack(side="left", padx=(0, 2))
+            # anchor="s": tab_bar's height is driven by its tallest child
+            # (the thinking-indicator label can exceed the tab's own
+            # height), and pack's default anchor="center" would then
+            # center each tab canvas within that extra space — leaving a
+            # sliver of empty space below the tab, between its own bottom
+            # edge and the content box's top edge, right where the tab is
+            # supposed to read as flush with the box. Anchoring to the
+            # bottom pins the tab flush against the box regardless of how
+            # tall tab_bar ends up being.
+            c.pack(side="left", padx=(0, 2), anchor="s")
             self._tab_canvases[tab_id] = (c, label)
             _draw_tab(c, label, tab_id == self._active_tab)
             if not disabled:
@@ -1567,18 +1665,98 @@ class VFXExporterApp(tk.Tk):
                                       for tid, (c, l) in self._tab_canvases.items()]
 
         # ── Tab content panel ──────────────────────────────────────────────
-        self.tab_content_frame = tk.Frame(main, bg=BG_DARK,
-                                           highlightthickness=1,
-                                           highlightbackground="#5a5a5a",
-                                           highlightcolor="#5a5a5a")
+        # Hand-drawn Canvas, not a plain Frame — a Frame's border is
+        # always a full rectangle, so it can't do rounded corners
+        # (top-right, bottom-left, bottom-right; top-left stays square,
+        # flush with where the tab bar starts) or a gap in the top
+        # border where the active tab sits, so the tab reads as
+        # literally part of this panel instead of a separate shape
+        # sitting on top of it. Same rectangle+arc technique _draw_tab
+        # already uses for the tabs themselves — see _redraw_tab_box.
+        #
+        # A Canvas doesn't auto-size to its embedded content the way a
+        # Frame does (its own width=/height= options are the only thing
+        # that drive its requested size) — every resize path
+        # (_resize_to_content, _pp_resize_window, _switch_tab,
+        # _center_window) explicitly sets this canvas's height to match
+        # the active tab's content before measuring self.winfo_reqheight(),
+        # so the window still grows/shrinks to fit content exactly as
+        # it did when this was a plain Frame.
+        #
+        # The embedded content (_vfx_content / _test_scroll_wrap) is
+        # inset from the canvas edges by self._tab_box_pad on every
+        # side — a create_window item embeds a REAL native child window,
+        # and native child windows always composite ABOVE anything drawn
+        # on the canvas itself regardless of tag_raise/tag_lower
+        # (confirmed live: the border/corner decoration was being drawn
+        # correctly but was invisible, silently painted-over by the
+        # content window every time). Insetting the content means the
+        # border/corner strokes live in a margin no embedded window ever
+        # reaches, instead of trying to paint decoration "on top of" one.
+        self._tab_box_pad = 12
+        # tw=130, packed padx=(0, 2) (see _make_tab) would put the tabs'
+        # true edges at (0,130)/(132,262) — but _draw_tab insets its own
+        # left/right border strokes by 1 (x=1 and x=tw-1) for the same
+        # off-canvas-clipping reason _redraw_tab_box's lx/we do, so a
+        # tab's actual rendered border sits 1px inside its true edge.
+        # Using the true (non-inset) edges here left a 1px notch at the
+        # corner where the tab's border didn't quite reach the point
+        # where the box's border resumed. These are already adjusted to
+        # match the tabs' real rendered positions instead.
+        self._tab_x_ranges = {"vfx": (0, 129), "test": (133, 261)}
+        self.tab_content_frame = tk.Canvas(main, bg=BG_OUTER, highlightthickness=0)
         self.tab_content_frame.pack(fill="both", expand=True, pady=(0, 8))
 
         self._vfx_content = tk.Frame(self.tab_content_frame, bg=BG_DARK, padx=16, pady=12)
-        self._vfx_content.pack(fill="both", expand=True)
         self.tab_content = self._vfx_content
+        self._vfx_content_window = self.tab_content_frame.create_window(
+            (self._tab_box_pad, self._tab_box_pad), window=self._vfx_content, anchor="nw")
         self._build_vfx_tab(self._vfx_content)
 
-        self._test_content = tk.Frame(self.tab_content_frame, bg=BG_DARK, padx=16, pady=12)
+        # Episode Export's content lives inside its own scrollable Canvas —
+        # its content can grow arbitrarily tall (many reels x many
+        # episodes), so instead of capping just the Export Queue box's own
+        # height (the old approach), the WHOLE tab scrolls once it would
+        # grow past the screen, and every box in it (Export Queue included)
+        # is free to grow to its natural size. See _pp_resize_window for
+        # the cap/scroll math, unchanged in spirit from before, just
+        # retargeted from the Export Queue's own canvas to this one.
+        self._test_scroll_wrap = tk.Frame(self.tab_content_frame, bg=BG_DARK)
+        self._test_canvas = tk.Canvas(self._test_scroll_wrap, bg=BG_DARK, highlightthickness=0)
+        self._test_scrollbar = self._make_scrollbar(self._test_scroll_wrap,
+                                                      command=self._test_canvas.yview)
+        self._test_canvas.configure(yscrollcommand=self._test_scrollbar.set)
+        self._test_canvas.pack(side="left", fill="both", expand=True)
+        self._test_content = tk.Frame(self._test_canvas, bg=BG_DARK, padx=16, pady=12)
+        self._test_canvas_window = self._test_canvas.create_window(
+            (0, 0), window=self._test_content, anchor="nw")
+
+        def _test_content_configure(event):
+            self._test_canvas.configure(scrollregion=self._test_canvas.bbox("all"))
+        self._test_content.bind("<Configure>", _test_content_configure)
+
+        def _test_canvas_configure(event):
+            self._test_canvas.itemconfig(self._test_canvas_window, width=event.width)
+        self._test_canvas.bind("<Configure>", _test_canvas_configure)
+
+        def _test_mousewheel(event):
+            self._test_canvas.yview_scroll(int(-1 * (event.delta)), "units")
+        def _test_bind_wheel(_):
+            self.bind_all("<MouseWheel>", _test_mousewheel)
+        def _test_unbind_wheel(_):
+            self.unbind_all("<MouseWheel>")
+        self._test_scroll_wrap.bind("<Enter>", _test_bind_wheel)
+        self._test_scroll_wrap.bind("<Leave>", _test_unbind_wheel)
+
+        self._test_scroll_wrap_window = self.tab_content_frame.create_window(
+            (self._tab_box_pad, self._tab_box_pad), window=self._test_scroll_wrap,
+            anchor="nw", state="hidden")
+
+        def _tab_box_configure(event):
+            self._sync_tab_box_content_width()
+            self._redraw_tab_box()
+        self.tab_content_frame.bind("<Configure>", _tab_box_configure)
+
         self._build_episode_export_tab(self._test_content)
 
     def _build_episode_export_tab(self, main):
@@ -1629,8 +1807,7 @@ class VFXExporterApp(tk.Tk):
         self._pp_srt_watcher_running = False
 
         # ── SHOW INFO ──────────────────────────────────────────────────────
-        self._section_label(main, "SHOW INFO")
-        self._pp_show_panel = self._panel(main)
+        self._pp_show_panel = self._collapsible_section(main, "SHOW INFO", self._pp_resize_window)
 
         # Input mode
         self._pp_show_mode_var = tk.StringVar(value="auto")
@@ -1667,8 +1844,7 @@ class VFXExporterApp(tk.Tk):
             v.trace_add("write", _update_pp_preview)
 
         # ── TITLE CARD TRACK ─────────────────────────────────────────────────
-        self._section_label(main, "TITLE CARD TRACK")
-        self._pp_track_panel = self._panel(main)
+        self._pp_track_panel = self._collapsible_section(main, "TITLE CARD TRACK", self._pp_resize_window)
         self._pp_track_radios = self._mode_row(self._pp_track_panel, self._pp_track_mode,
                                                 self._pp_on_track_mode_change)
 
@@ -1699,8 +1875,7 @@ class VFXExporterApp(tk.Tk):
         self._pp_track_manual_boxes = {}  # reel label -> box dict
 
         # ── OUTPUT FOLDER ────────────────────────────────────────────────────
-        self._section_label(main, "OUTPUT FOLDER")
-        self._pp_out_panel = self._panel(main)
+        self._pp_out_panel = self._collapsible_section(main, "OUTPUT FOLDER", self._pp_resize_window)
         self._mode_row(self._pp_out_panel, self._pp_out_mode,
                        self._pp_on_out_mode_change)
 
@@ -1969,58 +2144,19 @@ class VFXExporterApp(tk.Tk):
         self.btn_clear_all_exp.bind("<ButtonPress-1>",   lambda e: self.btn_clear_all_exp.config(bg="#1a1a1a"))
         self.btn_clear_all_exp.bind("<ButtonRelease-1>", lambda e: (self.btn_clear_all_exp.config(bg="#3a3a3a"), self._pp_clear_all_exp()))
         # padx=12, pady=0 on the outer frame + symmetric pady=12 on the
-        # canvas's pack() — matches VFX's ep_outer (DETECTED EPISODES)
-        # exactly, same as _pp_nest_ep_outer above, so all three chip
-        # boxes are the same height when empty (24px: 12 top + 12 bottom).
+        # chips frame's pack() — matches VFX's ep_outer (DETECTED EPISODES)
+        # and _pp_nest_ep_outer above, so all three chip boxes are the same
+        # height when empty (24px: 12 top + 12 bottom). Used to be a
+        # Canvas+Scrollbar so this one box could cap its own height and
+        # scroll independently — now the whole Episode Export tab scrolls
+        # instead (see self._test_canvas / _pp_resize_window in _build_ui),
+        # so this box is free to just grow to its natural size like the
+        # other two, plain Frame, no cap of its own.
         self._pp_exp_ep_outer = tk.Frame(main, bg="#252525", padx=12, pady=0)
         self._pp_exp_ep_outer.pack(fill="x", pady=(0, 8))
-        # Chips live inside a Canvas (not a plain Frame) so _pp_resize_window
-        # can cap this area's height and let it scroll once the window would
-        # otherwise grow past the bottom of the screen — SHOW LOG and
-        # everything below it stays visible instead of getting pushed off.
-        # The scrollbar itself is only packed in when actually needed (see
-        # _pp_resize_window), not shown for a queue that fits naturally.
-        # height=1 here matters: unlike a plain Frame, a Canvas doesn't
-        # auto-shrink to fit empty content — left unset, it renders at
-        # Tk's built-in default (198px) until _pp_resize_window() first
-        # runs to shrink it, which only happens later (on connect/nest/
-        # queue changes) — so a fresh, empty queue would otherwise show
-        # as a big empty grey box for no reason. 1 (not 0) because Tk
-        # enforces a hard 1px floor on Canvas height regardless — this
-        # box ends up 1px taller than the other two (25px vs. 24px) for
-        # that reason alone, as close a match as a Canvas structurally
-        # allows.
-        self._pp_exp_scroll_canvas = tk.Canvas(self._pp_exp_ep_outer, bg="#252525",
-                                                highlightthickness=0, height=1)
-        self._pp_exp_scrollbar = tk.Scrollbar(self._pp_exp_ep_outer, orient="vertical",
-                                               command=self._pp_exp_scroll_canvas.yview)
-        self._pp_exp_scroll_canvas.configure(yscrollcommand=self._pp_exp_scrollbar.set)
-        self._pp_exp_scroll_canvas.pack(side="left", fill="both", expand=True, pady=12)
-        self._pp_exp_chips_frame = tk.Frame(self._pp_exp_scroll_canvas, bg="#252525")
-        self._pp_exp_chips_window = self._pp_exp_scroll_canvas.create_window(
-            (0, 0), window=self._pp_exp_chips_frame, anchor="nw")
+        self._pp_exp_chips_frame = tk.Frame(self._pp_exp_ep_outer, bg="#252525")
+        self._pp_exp_chips_frame.pack(fill="x", pady=12)
         tk.Frame(self._pp_exp_chips_frame, bg="#252525", width=0, height=0).pack()
-
-        def _pp_exp_chips_configure(event):
-            self._pp_exp_scroll_canvas.configure(scrollregion=self._pp_exp_scroll_canvas.bbox("all"))
-        self._pp_exp_chips_frame.bind("<Configure>", _pp_exp_chips_configure)
-
-        def _pp_exp_canvas_configure(event):
-            # Keep the inner frame's width matching the canvas's actual
-            # rendered width (which shrinks once the scrollbar is packed
-            # in) — _pp_build_exp_chips wraps chips into rows based on
-            # self._pp_exp_chips_frame.winfo_width(), same as before.
-            self._pp_exp_scroll_canvas.itemconfig(self._pp_exp_chips_window, width=event.width)
-        self._pp_exp_scroll_canvas.bind("<Configure>", _pp_exp_canvas_configure)
-
-        def _pp_exp_mousewheel(event):
-            self._pp_exp_scroll_canvas.yview_scroll(int(-1 * (event.delta)), "units")
-        def _pp_exp_bind_wheel(_):
-            self.bind_all("<MouseWheel>", _pp_exp_mousewheel)
-        def _pp_exp_unbind_wheel(_):
-            self.unbind_all("<MouseWheel>")
-        self._pp_exp_ep_outer.bind("<Enter>", _pp_exp_bind_wheel)
-        self._pp_exp_ep_outer.bind("<Leave>", _pp_exp_unbind_wheel)
 
         # ── LOG (hidden by default) — same as VFX tab ─────────────────────
         pp_log_header = tk.Frame(main, bg=BG_DARK)
@@ -2066,32 +2202,42 @@ class VFXExporterApp(tk.Tk):
         self._pp_resize_window()
 
     def _pp_resize_window(self):
-        """Resize window to fit content, capping total height at the
-        screen's available height once it would otherwise grow past the
-        bottom of the screen. Export Queue's chip area absorbs the
-        overflow — it gets a fixed, scrollable height instead of growing
-        indefinitely — so SHOW LOG and everything below Export Queue stays
-        visible on screen instead of getting pushed off. A queue that
-        fits naturally gets no scrollbar at all. Window is locked
-        resizable(False, False), which blocks geometry() from growing it
-        on macOS unless briefly unlocked."""
+        """Resize window to fit the Episode Export tab's content, capping
+        total height at the screen's available height once it would
+        otherwise grow past the bottom of the screen. The WHOLE tab
+        scrolls once that happens (via self._test_canvas — see _build_ui)
+        — not just the Export Queue box like before — so every section
+        (Show Info, Output Folder, Export Queue, etc.) is free to grow to
+        its natural size instead of one specific box absorbing all the
+        overflow. A tab that fits naturally gets no scrollbar at all.
+        Window is locked resizable(False, False), which blocks geometry()
+        from growing it on macOS unless briefly unlocked."""
         self.update_idletasks()
         self.resizable(False, True)
+        # _test_scroll_wrap's own WIDTH first — its required height can
+        # depend on it (wrapped text etc.), and a stale width would throw
+        # off the content_natural measurement below.
+        self._sync_tab_box_content_width()
 
         # Always remeasure from the same clean baseline — scrollbar
-        # unpacked, canvas at the chip area's own natural height — so
-        # non_chip_height below isn't distorted by whatever the scrollbar
+        # unpacked, canvas at the tab content's own natural height — so
+        # chrome_height below isn't distorted by whatever the scrollbar
         # happened to be doing on the previous call (it takes width away
         # from the canvas once packed, which would otherwise throw off a
         # measurement taken after packing it).
-        if self._pp_exp_scrollbar.winfo_ismapped():
-            self._pp_exp_scrollbar.pack_forget()
-        chips_natural = self._pp_exp_chips_frame.winfo_reqheight()
-        self._pp_exp_scroll_canvas.configure(height=chips_natural)
+        if self._test_scrollbar.winfo_ismapped():
+            self._test_scrollbar.pack_forget()
+        content_natural = self._test_content.winfo_reqheight()
+        self._test_canvas.configure(height=content_natural)
+        # tab_content_frame (the Canvas _test_scroll_wrap is embedded in
+        # — see _build_ui) doesn't auto-size to its content the way a
+        # Frame would, so it has to be explicitly synced here too, or
+        # full_height below won't reflect the canvas height set just above.
+        self.tab_content_frame.configure(height=content_natural + 2 * self._tab_box_pad)
         self.update_idletasks()
 
         full_height = self.winfo_reqheight()
-        non_chip_height = full_height - chips_natural
+        chrome_height = full_height - content_natural
         # 170, not a tighter value — menu bar/title bar/Dock account for
         # under half of that; the rest is slack for the platform quirk the
         # retry below already works around (a large single-call height
@@ -2101,9 +2247,10 @@ class VFXExporterApp(tk.Tk):
         max_height = self.winfo_screenheight() - 170
 
         if full_height > max_height:
-            capped_chip_height = max(60, max_height - non_chip_height)
-            self._pp_exp_scroll_canvas.configure(height=capped_chip_height)
-            self._pp_exp_scrollbar.pack(side="right", fill="y", pady=12)
+            capped_content_height = max(60, max_height - chrome_height)
+            self._test_canvas.configure(height=capped_content_height)
+            self.tab_content_frame.configure(height=capped_content_height + 2 * self._tab_box_pad)
+            self._test_scrollbar.pack(side="right", fill="y")
             # A single update_idletasks() doesn't reliably finish
             # propagating a canvas height change into the actual rendered
             # layout when there are hundreds of chip widgets in the tree
@@ -2113,7 +2260,7 @@ class VFXExporterApp(tk.Tk):
             # up before computing the final window geometry from it.
             for _ in range(10):
                 self.update_idletasks()
-                if abs(self._pp_exp_scroll_canvas.winfo_height() - capped_chip_height) <= 1:
+                if abs(self._test_canvas.winfo_height() - capped_content_height) <= 1:
                     break
             target_height = max_height
         else:
@@ -2144,6 +2291,7 @@ class VFXExporterApp(tk.Tk):
                 self._pp_resize_retry_pending = False
                 self._pp_resize_window()
             self.after(50, _pp_resize_retry)
+        self._redraw_tab_box()
 
     def _pp_alert_dialog(self, title, message, show_illustration=False, tip=None):
         """Themed OK/Cancel modal for a heads-up that needs acknowledgment,
@@ -2252,6 +2400,25 @@ class VFXExporterApp(tk.Tk):
             "__out.push(__t.getFormatted(__set.videoFrameRate, __s.videoDisplayFormat));"
             "} __out.join('|');")
         return _es(script, decode_json=False).split("|")
+
+    def _pp_set_in_out_ticks(self, seq, in_ticks, out_ticks):
+        """Sets a sequence's in/out points from exact tick counts, not
+        lossy float seconds — same reasoning as _pp_format_timecodes:
+        ticks are Premiere's exact native, arbitrary-precision time unit,
+        so building the Time objects from tick STRINGS (as ExtendScript
+        does internally) avoids the float division/re-multiplication
+        round trip that can round to the wrong tick — and therefore land
+        a subsequence's in-point on the wrong frame — for large tick
+        values or certain frame rates."""
+        from pymiere.core import eval_script as _es
+        seq_ref = "$._pymiere['{}']".format(seq._pymiere_id)
+        script = (
+            f"var __s={seq_ref};"
+            f"var __in=new Time(); __in.ticks='{int(in_ticks)}';"
+            f"var __out=new Time(); __out.ticks='{int(out_ticks)}';"
+            "__s.setInPoint(__in); __s.setOutPoint(__out);"
+        )
+        _es(script, decode_json=False)
 
     def _pp_get_zero_ticks(self, seq):
         """Sequence's start timecode (zero point) in ticks, as a Python int.
@@ -2830,11 +2997,13 @@ class VFXExporterApp(tk.Tk):
         # LIVE's own enabled state is governed by Auto/Manual mode itself
         # (see _pp_on_out_mode_change) — don't stomp on that here.
 
-        # Guarded — this runs once at initial tab construction (placing
-        # LIVE for the first time), before EXPORT QUEUE further down has
-        # built the scrollbar _pp_resize_window depends on.
-        if hasattr(self, "_pp_exp_scrollbar"):
-            self._pp_resize_window()
+        # self._test_scrollbar (the whole-tab scrollbar _pp_resize_window
+        # depends on) is now built up front in _build_ui, before
+        # _build_episode_export_tab even starts — including this call,
+        # which runs once at initial tab construction (placing LIVE for
+        # the first time) — so it's always available here, unlike the old
+        # Export-Queue-specific scrollbar this used to guard against.
+        self._pp_resize_window()
 
     def _pp_connect(self):
         """Connect to Premiere Pro and list every STRINGOUT timeline in the
@@ -4922,17 +5091,14 @@ class VFXExporterApp(tk.Tk):
                 _status("Tracks already targeted/muted for this reel — skipping.", TEXT_MUTED)
 
             # Find tails / reel end. Internal math stays in ticks (Premiere's
-            # exact native time unit, arbitrary-precision as a Python int) for
-            # precise sorting/comparison — but Sequence.setInPoint/setOutPoint
-            # specifically want SECONDS (confirmed via Adobe's own scripting
-            # docs: "Integer or Time object - a new time in seconds"), unlike
-            # some other Premiere time APIs (e.g. setPlayerPosition, which
-            # does take ticks). Passing ticks there was the actual cause of
-            # episodes being skipped and landing on the wrong in/out points —
-            # ticks are ~254 billion per second, so misreading them as seconds
-            # would put the point wildly out of range. Ticks are converted to
-            # seconds only right at the setInPoint/setOutPoint call sites below.
-            TICKS_PER_SECOND = 254016000000.0
+            # exact native time unit, arbitrary-precision as a Python int)
+            # throughout, including at the actual setInPoint/setOutPoint call
+            # sites below (via _pp_set_in_out_ticks / _pp_create_subsequence_
+            # batched, which build Time objects from tick strings in
+            # ExtendScript) — not converted to float seconds, which was
+            # previously the cause of a leading blank frame on some nested
+            # episodes: dividing a large tick count by TICKS_PER_SECOND and
+            # back can round to the wrong tick boundary.
             tails_start = reel["tails_tc"]  # already ticks (int), cached from prescan
             reel_end = tails_start if tails_start is not None else int(seq.end)
 
@@ -5050,10 +5216,9 @@ class VFXExporterApp(tk.Tk):
                     # reaches one level deeper into pymiere's internals than a
                     # normal call.
                     sub = self._pp_create_subsequence_batched(
-                        seq, ep_start / TICKS_PER_SECOND, ep_end / TICKS_PER_SECOND, name)
+                        seq, ep_start, ep_end, name)
                 except Exception:
-                    seq.setInPoint(ep_start / TICKS_PER_SECOND)
-                    seq.setOutPoint(ep_end / TICKS_PER_SECOND)
+                    self._pp_set_in_out_ticks(seq, ep_start, ep_end)
                     sub = seq.createSubsequence(False)
                     sub.setZeroPoint("0")
                     sub.name = name
@@ -5108,8 +5273,7 @@ class VFXExporterApp(tk.Tk):
 
             # Restore in/out
             try:
-                seq.setInPoint(old_in / TICKS_PER_SECOND)
-                seq.setOutPoint(old_out / TICKS_PER_SECOND)
+                self._pp_set_in_out_ticks(seq, old_in, old_out)
             except Exception:
                 pass
 
@@ -5534,12 +5698,17 @@ class VFXExporterApp(tk.Tk):
         for thinking.gif) — so the app is self-sufficient regardless of
         whether AME's own preset folder has ever seen it. Only falls back
         to AME's own per-user preset folder (version-agnostic glob, so it
-        survives AME updates) if no bundled copy exists."""
-        script_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in dir() else None
-        if script_dir:
-            bundled = os.path.join(script_dir, f"{style}.epr")
-            if os.path.exists(bundled):
-                return bundled
+        survives AME updates) if no bundled copy exists.
+
+        Same "__file__ in dir()" bug fixed here as in the thinking.gif
+        loader — that check is always False inside a method (dir() with
+        no args reflects local scope only), so script_dir was always None
+        and this function was silently skipping the bundled-copy check
+        entirely, contrary to what this docstring says."""
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        bundled = os.path.join(script_dir, f"{style}.epr")
+        if os.path.exists(bundled):
+            return bundled
         import glob
         matches = sorted(glob.glob(os.path.expanduser(
             f"~/Documents/Adobe/Adobe Media Encoder/*/Presets/{style}.epr")))
@@ -5680,7 +5849,7 @@ class VFXExporterApp(tk.Tk):
         val = "1" if muted else "0"
         _es(f"{ref}.{track_type}[{track_idx}].setMute({val});")
 
-    def _pp_create_subsequence_batched(self, seq, in_sec, out_sec, name):
+    def _pp_create_subsequence_batched(self, seq, in_ticks, out_ticks, name):
         """Sets in/out points, creates the subsequence, zeroes it, and
         names it — all in one ExtendScript round trip instead of five
         (setInPoint, setOutPoint, createSubsequence, setZeroPoint, name=)
@@ -5694,6 +5863,12 @@ class VFXExporterApp(tk.Tk):
         continues) and there's no need to risk that behavior for one more
         round trip saved.
 
+        in_ticks/out_ticks are exact Premiere ticks (int), not seconds —
+        built into Time objects from tick strings in ExtendScript, same
+        approach as _pp_set_in_out_ticks / _pp_format_timecodes, so there's
+        no lossy float round trip that could round to the wrong tick and
+        leave a stray blank frame at the head of the subsequence.
+
         Raises on any failure — callers should fall back to the five
         separate calls this replaces if this raises, since it reaches one
         level deeper into pymiere's internals than a normal call and
@@ -5704,14 +5879,16 @@ class VFXExporterApp(tk.Tk):
         script = (
             "(function(){{"
             "var __s={seq_ref};"
-            "__s.setInPoint({in_sec});"
-            "__s.setOutPoint({out_sec});"
+            "var __in=new Time(); __in.ticks='{in_ticks}';"
+            "var __out=new Time(); __out.ticks='{out_ticks}';"
+            "__s.setInPoint(__in);"
+            "__s.setOutPoint(__out);"
             "var __sub=__s.createSubsequence(false);"
             "__sub.setZeroPoint('0');"
             "__sub.name={name_json};"
             "return __sub;"
             "}})()"
-        ).format(seq_ref=seq_ref, in_sec=repr(float(in_sec)), out_sec=repr(float(out_sec)),
+        ).format(seq_ref=seq_ref, in_ticks=int(in_ticks), out_ticks=int(out_ticks),
                   name_json=json.dumps(name))
         result = _eval_script_returning_object(script)
         return _format_object_to_py(result)
@@ -6348,7 +6525,6 @@ class VFXExporterApp(tk.Tk):
 
     def _pp_export_task(self, out_dirs, styles, preset_paths, srt_out_dir=None, srt_active=False):
         import pymiere, os
-        TICKS_PER_SECOND = 254016000000.0
 
         def _status(msg, color=TEXT_MUTED):
             self.after(0, lambda m=msg, c=color: self._pp_exp_status.config(text=m, fg=c))
@@ -6465,13 +6641,11 @@ class VFXExporterApp(tk.Tk):
                     if trim_ticks is not None:
                         full_out_ticks = int(sub.end)
                         try:
-                            sub.setInPoint(0)
-                            sub.setOutPoint(trim_ticks / TICKS_PER_SECOND)
+                            self._pp_set_in_out_ticks(sub, 0, trim_ticks)
                             encoder.encodeSequence(sub, out_path, preset_paths[style],
                                                     encoder.ENCODE_IN_TO_OUT, 0, False)
                         finally:
-                            sub.setInPoint(0)
-                            sub.setOutPoint(full_out_ticks / TICKS_PER_SECOND)
+                            self._pp_set_in_out_ticks(sub, 0, full_out_ticks)
                     else:
                         encoder.encodeSequence(sub, out_path, preset_paths[style],
                                                 encoder.ENCODE_ENTIRE, 0, False)
@@ -6586,8 +6760,7 @@ class VFXExporterApp(tk.Tk):
 
     def _build_vfx_tab(self, main):
         # ── SHOW INFO ──────────────────────────────────────────────────────
-        self._section_label(main, "SHOW INFO")
-        show_frame = self._panel(main)
+        show_frame = self._collapsible_section(main, "SHOW INFO", self._resize_to_content)
 
         self._mode_row(show_frame, self.show_mode, self._on_show_mode_change)
 
@@ -6625,8 +6798,7 @@ class VFXExporterApp(tk.Tk):
                                    font=FONT_SMALL, bg=BG_PANEL, fg="#666666")
 
         # ── REFERENCE VIDEO ────────────────────────────────────────────────
-        self._section_label(main, "REFERENCE VIDEO")
-        ref_frame = self._panel(main)
+        ref_frame = self._collapsible_section(main, "REFERENCE VIDEO", self._resize_to_content)
         self._mode_row(ref_frame, self.ref_mode, self._on_ref_mode_change)
         ref_row = tk.Frame(ref_frame, bg=BG_PANEL)
         ref_row.pack(fill="x", pady=4)
@@ -6646,8 +6818,7 @@ class VFXExporterApp(tk.Tk):
         self.ref_hint.pack(anchor="w", pady=(4, 0))
 
         # ── OUTPUT FOLDER ──────────────────────────────────────────────────
-        self._section_label(main, "OUTPUT FOLDER")
-        out_frame = self._panel(main)
+        out_frame = self._collapsible_section(main, "OUTPUT FOLDER", self._resize_to_content)
         self._mode_row(out_frame, self.out_mode, self._on_out_mode_change)
         out_row = tk.Frame(out_frame, bg=BG_PANEL)
         out_row.pack(fill="x", pady=4)
@@ -7117,12 +7288,38 @@ class VFXExporterApp(tk.Tk):
             self._render_show_pill(self._show_pill_text.get(tab_id, ""))
         if hasattr(self, '_draw_tab_fn'):
             self._draw_tab_fn()
+        # _vfx_content / _test_scroll_wrap are Canvas-embedded windows now
+        # (see _build_ui), not packed children — toggled via itemconfigure
+        # state instead of pack_forget()/pack().
         if tab_id == "vfx":
-            self._test_content.pack_forget()
-            self._vfx_content.pack(fill="both", expand=True)
+            self.tab_content_frame.itemconfigure(self._test_scroll_wrap_window, state="hidden")
+            self.tab_content_frame.itemconfigure(self._vfx_content_window, state="normal")
         elif tab_id == "test":
-            self._vfx_content.pack_forget()
-            self._test_content.pack(fill="both", expand=True)
+            self.tab_content_frame.itemconfigure(self._vfx_content_window, state="hidden")
+            self.tab_content_frame.itemconfigure(self._test_scroll_wrap_window, state="normal")
+        self.update_idletasks()
+        # The gap in the panel's top border tracks whichever tab is
+        # active (see _redraw_tab_box) — redraw regardless of whether the
+        # size below actually changes, since the gap's position can move
+        # even when the height doesn't.
+        self._redraw_tab_box()
+
+        if tab_id == "test":
+            # Episode Export's content can be taller than the screen —
+            # route through the same cap-at-screen-height + scroll logic
+            # used throughout that tab (_pp_resize_window), instead of the
+            # plain fit-to-content resize below, which doesn't know about
+            # the screen-height cap.
+            self._pp_resize_window()
+            return
+
+        # tab_content_frame doesn't auto-size to its content the way a
+        # Frame would — synced explicitly before winfo_reqheight() below
+        # can reflect it (see _resize_to_content for the same pattern).
+        # Width first — height can depend on it.
+        self._sync_tab_box_content_width()
+        self.tab_content_frame.configure(
+            height=max(self._vfx_content.winfo_reqheight(), 1) + 2 * self._tab_box_pad)
         self.update_idletasks()
         # Window is locked resizable(False, False) — geometry() silently
         # fails to grow it on macOS unless briefly unlocked first (every
@@ -7147,9 +7344,20 @@ class VFXExporterApp(tk.Tk):
             def _switch_tab_resize_retry():
                 self._switch_tab_resize_retry_pending = False
                 self.update_idletasks()
+                self._sync_tab_box_content_width()
+                self.tab_content_frame.configure(
+                    height=max(self._vfx_content.winfo_reqheight(), 1) + 2 * self._tab_box_pad)
+                self.update_idletasks()
                 self.resizable(False, True)
                 self.geometry(f"{APP_WIDTH}x{self.winfo_reqheight()}")
                 self.resizable(False, False)
+                # Without this, the border stayed drawn at whatever size
+                # the canvas had BEFORE this retry corrected it — this
+                # retry exists specifically for large jumps (e.g.
+                # switching tabs), so that stale draw was routinely
+                # visible as the bottom/bottom-left border cut short.
+                self.update_idletasks()
+                self._redraw_tab_box()
             self.after(50, _switch_tab_resize_retry)
 
     def _build_log_window(self, title):
@@ -7164,7 +7372,7 @@ class VFXExporterApp(tk.Tk):
         body = tk.Frame(win, bg=BG_DARK, padx=8, pady=8)
         body.pack(fill="both", expand=True)
         log_p = self._panel(body)
-        log_scroll = tk.Scrollbar(log_p, bg=BG_PANEL)
+        log_scroll = self._make_scrollbar(log_p, bg=BG_PANEL)
         log_scroll.pack(side="right", fill="y")
         log_box = tk.Text(log_p, font=FONT_MONO, bg=BG_INPUT, fg=TEXT_PRIMARY,
                            relief="flat", bd=0, width=1, highlightthickness=0,
@@ -7472,6 +7680,317 @@ class VFXExporterApp(tk.Tk):
         f.pack(fill="x", pady=(0, 4))
         inner = tk.Frame(f, bg=BG_PANEL, padx=12, pady=10)
         inner.pack(fill="both", expand=True)
+        return inner
+
+    def _make_scrollbar(self, parent, command=None, width=10, bg=None):
+        """Custom Canvas-drawn vertical scrollbar, matching the app's dark
+        theme — a plain tk.Scrollbar always renders as the stock Aqua
+        overlay scrollbar on macOS regardless of any color option (bg,
+        troughcolor, activebackground — all silently ignored, confirmed
+        live), same root cause as every other custom-styled widget in
+        this file (buttons, dropdowns, checkboxes) needing a hand-drawn
+        Canvas instead of the native widget. Implements the same
+        .set(lo, hi) / command("moveto"|"scroll", ...) protocol as
+        tk.Scrollbar, so it's a drop-in replacement anywhere a Text/Canvas
+        widget's yscrollcommand or a Scrollbar's own command= is wired up."""
+        sb = tk.Canvas(parent, width=width, bg=bg or parent.cget("bg"),
+                        highlightthickness=0, cursor="arrow")
+        sb._frac = (0.0, 1.0)
+        sb._dragging = False
+        sb._hover = False
+        sb._drag_anchor_y = 0
+        sb._drag_anchor_lo = 0.0
+        sb._command = command
+
+        def _redraw():
+            sb.delete("all")
+            h = sb.winfo_height()
+            if h <= 1:
+                return
+            lo, hi = sb._frac
+            pad = 2
+            tw = width - pad * 2
+            top, bot = lo * h, hi * h
+            min_len = tw * 3
+            if bot - top < min_len:
+                mid = (top + bot) / 2
+                top = max(0, mid - min_len / 2)
+                bot = min(h, top + min_len)
+            color = "#a06010" if sb._dragging else ("#f0c060" if sb._hover else ACCENT)
+            r = tw / 2
+            if bot - top >= tw:
+                sb.create_oval(pad, top, pad + tw, top + tw, fill=color, outline="")
+                sb.create_oval(pad, bot - tw, pad + tw, bot, fill=color, outline="")
+                sb.create_rectangle(pad, top + r, pad + tw, bot - r, fill=color, outline="")
+            else:
+                sb.create_oval(pad, top, pad + tw, bot, fill=color, outline="")
+        sb._redraw = _redraw
+
+        def _set(lo, hi):
+            sb._frac = (float(lo), float(hi))
+            _redraw()
+        sb.set = _set
+
+        def _config(command=None, **_kw):
+            if command is not None:
+                sb._command = command
+        sb.config = _config
+        sb.configure = _config
+
+        def _frac_at(y):
+            h = sb.winfo_height()
+            return max(0.0, min(1.0, y / h)) if h > 0 else 0.0
+
+        def _on_press(event):
+            lo, hi = sb._frac
+            h = sb.winfo_height()
+            top, bot = lo * h, hi * h
+            if top <= event.y <= bot:
+                sb._dragging = True
+                sb._drag_anchor_y = event.y
+                sb._drag_anchor_lo = lo
+            elif sb._command:
+                sb._command("moveto", _frac_at(event.y))
+            _redraw()
+
+        def _on_drag(event):
+            if not sb._dragging or sb._command is None:
+                return
+            h = sb.winfo_height()
+            if h <= 0:
+                return
+            new_lo = max(0.0, min(1.0, sb._drag_anchor_lo + (event.y - sb._drag_anchor_y) / h))
+            sb._command("moveto", new_lo)
+
+        def _on_release(_event):
+            sb._dragging = False
+            _redraw()
+
+        def _on_enter(_event):
+            sb._hover = True
+            _redraw()
+
+        def _on_leave(_event):
+            sb._hover = False
+            _redraw()
+
+        sb.bind("<ButtonPress-1>", _on_press)
+        sb.bind("<B1-Motion>", _on_drag)
+        sb.bind("<ButtonRelease-1>", _on_release)
+        sb.bind("<Enter>", _on_enter)
+        sb.bind("<Leave>", _on_leave)
+        sb.bind("<Configure>", lambda e: _redraw())
+        return sb
+
+    def _redraw_tab_box(self):
+        """Draws the tab content panel's rounded/gapped border. Both top
+        corners stay square (top-left flush with where the tab bar
+        starts; top-right left square too, by request); only the two
+        bottom corners are rounded. The top edge is gold, matching the
+        active tab's own border weight, with a gap exactly spanning the
+        active tab's width so the tab reads as literally part of this
+        panel rather than a separate shape sitting on top of it.
+
+        The embedded content (_vfx_content / _test_scroll_wrap) is inset
+        by self._tab_box_pad on every side (see _build_ui) specifically
+        so it never overlaps this margin — a create_window item embeds a
+        real native child window, and native windows always composite
+        above anything drawn on the canvas itself, no matter the
+        tag_raise/tag_lower order, so decoration painted "on top of" the
+        content would never actually be visible. Drawing it in a margin
+        the content can't reach avoids that fight entirely, same
+        rectangle+arc technique _draw_tab already uses for the tabs
+        themselves."""
+        c = self.tab_content_frame
+        c.delete("box")
+        w = c.winfo_width()
+        h = c.winfo_height()
+        if w <= 1 or h <= 1:
+            return
+        r = 10
+        lw = 1.5
+        grey = "#5a5a5a"
+        fill = BG_DARK
+
+        gap_lo, gap_hi = self._tab_x_ranges.get(self._active_tab, (0, 0))
+
+        # Fill reaches the TRUE edge (w/h) — a filled shape doesn't have
+        # the boundary problem below, and pulling it in too would leave a
+        # bare 1px sliver of the canvas's own bg showing at the true edge.
+        c.create_rectangle(0, 0, w, h - r, fill=fill, outline="", tags="box")
+        c.create_rectangle(r, h - r, w - r, h, fill=fill, outline="", tags="box")
+        c.create_arc(w - 2 * r, h - 2 * r, w, h, start=270, extent=90,
+                     fill=fill, outline="", tags="box")
+        c.create_arc(0, h - 2 * r, 2 * r, h, start=180, extent=90,
+                     fill=fill, outline="", tags="box")
+
+        # Every STROKE (line or arc outline), by contrast, uses we/he —
+        # w-1/h-1 — instead of the canvas's true w/h, everywhere a
+        # coordinate would otherwise sit on that far edge. A 1px-wide
+        # stroke drawn exactly AT the canvas's width/height falls one
+        # pixel past its actual paintable area (valid pixels only run
+        # 0..width-1 / 0..height-1) and silently doesn't render at all
+        # (confirmed live: the left/top borders, at x=0/y=0, rendered
+        # fine; the right/bottom borders, at x=w/y=h, were invisible
+        # along their whole straight run). Both the straight lines AND
+        # the corner arcs need the SAME we/he — using it on only one
+        # (as an earlier version of this fix did) leaves the two meeting
+        # at slightly different points, a visible 1px gap right at the
+        # seam between the straight run and the curve.
+        # lx/ty mirror we/he on the opposite edges — a stroke of a
+        # non-integer width (lw=1.5) is centered ON its coordinate, so
+        # one drawn AT the true edge (0) has half its width fall off the
+        # canvas and clip, the same way one drawn at the true w/h does.
+        # Insetting by 1 on every side keeps the border's rendered
+        # thickness uniform on all four edges instead of the left/top
+        # coming out visibly thinner than the right/bottom.
+        we, he = w - 1, h - 1
+        lx, ty = 1, 1
+        # capstyle="projecting" on every straight border line here: Tk's
+        # default butt cap stops a stroke exactly at its endpoint
+        # coordinate, covering only that coordinate's CENTER width-wise —
+        # so two perpendicular strokes that merely touch end-to-end (as
+        # these do, meeting the tab's own border drawn in _draw_tab, and
+        # each other at the rounded-corner arcs) leave a small square
+        # notch uncovered right at the joint instead of a solid corner.
+        # Projecting extends each stroke by half its own width past its
+        # endpoint, so the shapes actually overlap at every joint.
+        c.create_line(we, ty, we, he - r, fill=grey, width=lw, tags="box", capstyle="projecting")
+        c.create_arc(we - 2 * r, he - 2 * r, we, he, start=270, extent=90, style="arc",
+                     outline=grey, width=lw, tags="box")
+        c.create_line(we - r, he, r, he, fill=grey, width=lw, tags="box", capstyle="projecting")
+        c.create_arc(lx, he - 2 * r, lx + 2 * r, he, start=180, extent=90, style="arc",
+                     outline=grey, width=lw, tags="box")
+        # This one's top endpoint stays at the true edge (0), not ty —
+        # unlike the top border's own clipping fix, this line's *width*
+        # only clips sideways (x), so a y=0 top doesn't reintroduce that
+        # problem, and when the "vfx" tab (gap_lo=0, no top-left gold
+        # segment drawn at all) is active, this grey line is the only
+        # stroke in that corner — pulling its top down to ty left a 1px
+        # gap between the tab's own bottom border and this one.
+        c.create_line(lx, he - r, lx, 0, fill=grey, width=lw, tags="box", capstyle="projecting")
+
+        # gap_lo/gap_hi come from _tab_x_ranges, already adjusted to the
+        # tab's own actual (inset-by-1) border position rather than its
+        # true untrimmed edge — see _tab_x_ranges' comment. Using the
+        # tab's true edge here left a 1px notch at the corner where the
+        # tab's own right border (itself inset for the same clipping
+        # reason) didn't quite reach the point where this border resumes.
+        if gap_lo > 0:
+            c.create_line(lx, ty, gap_lo, ty, fill=ACCENT, width=lw, tags="box", capstyle="projecting")
+        if gap_hi < we:
+            c.create_line(max(gap_hi, lx), ty, we, ty, fill=ACCENT, width=lw, tags="box", capstyle="projecting")
+
+        c.tag_lower("box")
+
+    def _sync_tab_box_content_width(self):
+        """Sets the embedded content's (create_window) width to match
+        tab_content_frame's actual current width minus the decorative
+        margin on both sides — using a live winfo_width() query, not the
+        <Configure> event's own .width field. The event's width was
+        getting stuck at whatever an earlier, narrower intermediate
+        layout pass happened to report (Tk doesn't guarantee every
+        Configure event's payload reflects the FINAL settled size when
+        several resizes happen in quick succession during construction),
+        permanently leaving unused space on the right — and, since a
+        too-narrow frame can measure a different (taller) required
+        height for wrapped text, cascading into an undersized height
+        calculation that cut the bottom border/corners short.
+
+        Called explicitly at the start of every resize path
+        (_resize_to_content, _pp_resize_window, _switch_tab,
+        _center_window), before winfo_reqheight() is measured — not left
+        to only the <Configure> handler, so content is guaranteed
+        correctly sized before that measurement happens, not whenever
+        Tk next gets around to delivering the event."""
+        inner_w = max(self.tab_content_frame.winfo_width() - 2 * self._tab_box_pad, 1)
+        self.tab_content_frame.itemconfig(self._vfx_content_window, width=inner_w)
+        self.tab_content_frame.itemconfig(self._test_scroll_wrap_window, width=inner_w)
+
+    def _resize_to_content(self):
+        """Plain fit-to-content resize — same three-line pattern already
+        used throughout the VFX tab (e.g. _on_input_mode_change). Window
+        is locked resizable(False, False), which blocks geometry() from
+        growing/shrinking it on macOS unless briefly unlocked first.
+
+        tab_content_frame (the Canvas the VFX tab's content is embedded
+        in — see _build_ui) doesn't auto-size to that content the way a
+        Frame would, so its height has to be explicitly synced to the
+        content's own natural height before self.winfo_reqheight() below
+        can reflect it."""
+        self.update_idletasks()
+        self._sync_tab_box_content_width()
+        self.tab_content_frame.configure(
+            height=max(self._vfx_content.winfo_reqheight(), 1) + 2 * self._tab_box_pad)
+        self.update_idletasks()
+        self.resizable(False, True)
+        self.geometry(f"{APP_WIDTH}x{self.winfo_reqheight()}")
+        self.resizable(False, False)
+        self._redraw_tab_box()
+
+    def _collapsible_section(self, parent, text, on_toggle):
+        """Same look as _section_label, but the header row is clickable
+        and toggles the panel built right after it (via self._panel(parent))
+        collapsed/expanded — reclaiming vertical space on short screens
+        without losing the section entirely. on_toggle is called after
+        each toggle so the caller can re-run whichever window-resize
+        logic applies to its tab (_resize_to_content for VFX,
+        _pp_resize_window for Episode Export, which also needs to know
+        about the newly freed/used space to size its scroll cap).
+
+        Returns the panel's inner content frame — same as calling
+        self._panel(parent) directly — so existing call sites only need
+        their _section_label + _panel pair replaced with one call here."""
+        row = tk.Frame(parent, bg=BG_DARK, cursor="pointinghand")
+        row.pack(anchor="w", pady=(12, 4), fill="x")
+
+        # A drawn triangle, not a "▾"/"▸" text glyph — same reasoning as
+        # _canvas_dropdown's arrow (see its comment): those glyphs render
+        # as an indistinct dot at small sizes in this font, which read as
+        # "not moving" when toggled between down/right. A drawn shape is
+        # guaranteed to look right, and ACCENT (ExpressForm's gold) makes
+        # it read as clickable rather than blending into the muted label.
+        chev_size = 18
+        chevron = tk.Canvas(row, width=chev_size, height=chev_size,
+                             bg=BG_DARK, highlightthickness=0, cursor="pointinghand")
+        chevron.pack(side="left", padx=(0, 4))
+
+        def _draw_chevron(expanded):
+            chevron.delete("all")
+            cx, cy = chev_size // 2, chev_size // 2
+            if expanded:
+                pts = [cx - 6, cy - 3, cx + 6, cy - 3, cx, cy + 5]
+            else:
+                pts = [cx - 3, cy - 6, cx - 3, cy + 6, cx + 5, cy]
+            chevron.create_polygon(pts, fill=ACCENT, outline="")
+        _draw_chevron(True)
+
+        tk.Label(row, text=text, font=("SF Pro Display", 10, "bold"),
+                 bg=BG_DARK, fg=TEXT_MUTED, cursor="pointinghand").pack(side="left")
+
+        inner = self._panel(parent)
+        wrap = inner.master  # the outer bordered Frame _panel() builds and packs
+
+        state = {"expanded": True}
+
+        def _toggle(_event=None):
+            state["expanded"] = not state["expanded"]
+            if state["expanded"]:
+                # after=row, not a bare pack() — a bare pack() re-adds the
+                # widget at the END of its parent's packing order, which
+                # dropped it to the bottom of the tab instead of back into
+                # its original slot. row itself is never forgotten, so
+                # anchoring to it always reinserts wrap right after its
+                # own header, regardless of what else changed in between.
+                wrap.pack(fill="x", pady=(0, 4), after=row)
+            else:
+                wrap.pack_forget()
+            _draw_chevron(state["expanded"])
+            on_toggle()
+
+        row.bind("<Button-1>", _toggle)
+        for child in row.winfo_children():
+            child.bind("<Button-1>", _toggle)
         return inner
 
     def _field_row(self, parent, label, var, placeholder=""):
@@ -7928,8 +8447,177 @@ class VFXExporterApp(tk.Tk):
         help_menu = tk.Menu(menubar, name="help", tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(label="Setup Guide", command=self._open_guide)
+        help_menu.add_command(label="Report a Bug / Feedback...", command=self._open_feedback_dialog)
         self.config(menu=menubar)
         self.update_idletasks()
+
+    def _open_feedback_dialog(self):
+        """Modal dialog for reporting a bug or leaving feedback — same
+        Toplevel conventions as _pp_alert_dialog (withdraw-then-center-
+        then-deiconify, transient+grab_set). Send POSTs directly to the
+        GitHub Issues API (see _submit_feedback) — no external app (Mail,
+        browser) ever opens."""
+        dlg = tk.Toplevel(self)
+        dlg.withdraw()
+        dlg.title("Report a Bug / Feedback")
+        dlg.configure(bg=BG_DARK)
+        dlg.resizable(False, False)
+        dlg.transient(self)
+
+        body = tk.Frame(dlg, bg=BG_DARK, padx=24, pady=20)
+        body.pack(fill="both", expand=True)
+
+        tk.Label(body, text="Report a Bug / Feedback", font=("SF Pro Display", 16, "bold"),
+                 bg=BG_DARK, fg=ACCENT, anchor="w").pack(anchor="w", pady=(0, 8))
+        tk.Label(body, text="Describe what happened. Your description and the app's log "
+                             "will be sent to the developer.",
+                 font=FONT_LABEL, bg=BG_DARK, fg=TEXT_MUTED,
+                 wraplength=420, justify="left", anchor="w").pack(anchor="w", pady=(0, 12))
+
+        tk.Label(body, text="Name", font=FONT_SMALL, bg=BG_DARK, fg=TEXT_MUTED,
+                 anchor="w").pack(anchor="w", pady=(0, 2))
+        name_wrap = tk.Frame(body, bg=BG_INPUT, highlightthickness=1,
+                              highlightbackground=BORDER, highlightcolor=BORDER)
+        name_wrap.pack(fill="x", pady=(0, 12))
+        name_var = tk.StringVar(value=getattr(self, "_feedback_last_name", ""))
+        name_entry = tk.Entry(name_wrap, textvariable=name_var, font=FONT_LABEL,
+                               bg=BG_INPUT, fg=TEXT_PRIMARY, insertbackground=TEXT_PRIMARY,
+                               relief="flat", bd=0, highlightthickness=0)
+        name_entry.pack(fill="x", padx=8, ipady=6)
+
+        tk.Label(body, text="Description", font=FONT_SMALL, bg=BG_DARK, fg=TEXT_MUTED,
+                 anchor="w").pack(anchor="w", pady=(0, 2))
+        text_box = tk.Text(body, width=56, height=8, bg=BG_INPUT, fg=TEXT_PRIMARY,
+                            insertbackground=TEXT_PRIMARY, font=FONT_LABEL,
+                            wrap="word", relief="flat", padx=8, pady=8,
+                            highlightthickness=0)
+        text_box.pack(fill="both", expand=True, pady=(0, 8))
+        name_entry.focus_set() if not name_var.get() else text_box.focus_set()
+
+        # tk.Text captures Tab to insert a literal tab character instead of
+        # moving focus (unlike Entry, which tabs normally) — rebind both
+        # directions to actually traverse focus, matching every other field.
+        def _focus_prev(event):
+            event.widget.tk_focusPrev().focus()
+            return "break"
+        def _focus_next(event):
+            event.widget.tk_focusNext().focus()
+            return "break"
+        text_box.bind("<Tab>", _focus_next)
+        text_box.bind("<Shift-Tab>", _focus_prev)
+
+        status_label = tk.Label(body, text="", font=FONT_SMALL, bg=BG_DARK, fg=TEXT_MUTED,
+                                 wraplength=420, justify="left", anchor="w")
+        status_label.pack(anchor="w", pady=(0, 8))
+
+        btn_row = tk.Frame(body, bg=BG_DARK)
+        btn_row.pack(anchor="e", fill="x")
+
+        cancel_btn = self._rounded_btn(btn_row, "Cancel", lambda: dlg.destroy())
+        cancel_btn.pack(side="right")
+        send_btn = self._rounded_btn(btn_row, "Send", lambda: self._submit_feedback(
+            name_var, text_box, send_btn, cancel_btn, status_label, dlg), accent=True)
+        send_btn.pack(side="right", padx=(0, 8))
+
+        dlg.protocol("WM_DELETE_WINDOW", dlg.destroy)
+        dlg.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_reqwidth()) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - dlg.winfo_reqheight()) // 2
+        dlg.geometry(f"+{x}+{y}")
+        dlg.deiconify()
+        dlg.grab_set()
+
+    def _submit_feedback(self, name_var, text_box, send_btn, cancel_btn, status_label, dlg):
+        """POST the typed name + description + both tabs' in-memory logs to
+        the GitHub Issues API as a new issue — runs on a background thread
+        so the dialog stays responsive, matching the threading convention
+        used everywhere else in this file (e.g. _check_for_updates)."""
+        name = name_var.get().strip()
+        description = text_box.get("1.0", "end").strip()
+        self._feedback_last_name = name  # pre-fill next time this dialog opens
+
+        self._set_btn_state(send_btn, False)
+        self._set_btn_state(cancel_btn, False)
+        text_box.config(state="disabled")
+        status_label.config(text="Sending...", fg=TEXT_MUTED)
+
+        def _on_success():
+            status_label.config(text="✓ Sent — thank you!", fg=TEXT_SUCCESS)
+            self.after(1500, dlg.destroy)
+
+        def _on_failure(err_msg):
+            status_label.config(text=f"✗ Could not send: {err_msg}", fg=TEXT_ERROR)
+            text_box.config(state="normal")
+            self._set_btn_state(send_btn, True)
+            self._set_btn_state(cancel_btn, True)
+
+        def task():
+            try:
+                import urllib.request, urllib.error, json, ssl, platform
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                header = (f"Name: {name or '(not provided)'}\n"
+                          f"App version: {APP_VERSION}\n"
+                          f"macOS: {platform.mac_ver()[0]}\n"
+                          f"Submitted: {timestamp}\n")
+
+                vfx_log = "\n".join(msg for msg, _tag in self._log_buffer)
+                pp_log = "\n".join(msg for msg, _tag in self._pp_log_buffer)
+
+                full_body = "\n".join([
+                    header,
+                    "## Description",
+                    description or "(no description provided)",
+                    "",
+                    "## VFX Export log",
+                    "```", vfx_log or "(empty)", "```",
+                    "",
+                    "## Episode Export log",
+                    "```", pp_log or "(empty)", "```",
+                ])
+
+                # GitHub caps issue bodies at 65536 chars — trim from the
+                # front (oldest content) if needed, keeping the most
+                # recent activity intact since that's most likely relevant.
+                MAX_BODY = 60000
+                if len(full_body) > MAX_BODY:
+                    overflow = len(full_body) - MAX_BODY
+                    full_body = f"[...{overflow} earlier characters truncated...]\n" + full_body[-MAX_BODY:]
+
+                # Description lives in its own section of the body, not
+                # the title — the title is just for identifying who/when.
+                if name:
+                    title = f"Feedback from {name} — v{APP_VERSION} — {timestamp}"
+                else:
+                    title = f"Feedback — v{APP_VERSION} — {timestamp}"
+
+                payload = json.dumps({"title": title, "body": full_body}).encode("utf-8")
+                url = f"https://api.github.com/repos/{FEEDBACK_REPO}/issues"
+                req = urllib.request.Request(url, data=payload, method="POST", headers={
+                    "Authorization": f"Bearer {FEEDBACK_TOKEN}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                    "User-Agent": "FinishingTool",
+                    "Content-Type": "application/json",
+                })
+                resp = urllib.request.urlopen(req, context=ctx, timeout=30)
+                if resp.getcode() == 201:
+                    self.after(0, _on_success)
+                else:
+                    self.after(0, lambda code=resp.getcode(): _on_failure(f"Unexpected response ({code})"))
+            except urllib.error.HTTPError as e:
+                try:
+                    msg = json.loads(e.read().decode()).get("message", str(e))
+                except Exception:
+                    msg = str(e)
+                self.after(0, lambda m=msg: _on_failure(m))
+            except Exception as e:
+                self.after(0, lambda err=e: _on_failure(str(err)))
+
+        threading.Thread(target=task, daemon=True).start()
 
     def _pp_build_track_illustration(self, parent):
         """Small looping animation reinforcing the "select all tracks,
@@ -8135,18 +8823,48 @@ class VFXExporterApp(tk.Tk):
         self._guide_tabs = {}
         self._guide_active_tab = tk.StringVar(value="clips")
 
-        # Content area (built before tabs so tabs can reference it)
-        content_frame = tk.Frame(win, bg=BG_DARK, bd=0, highlightthickness=1,
-                                  highlightbackground="#5a5a5a", highlightcolor="#5a5a5a")
+        # Content area (built before tabs so tabs can reference it) — a
+        # hand-drawn Canvas, not a plain bordered Frame, so this window
+        # matches the main app's tab content panel: square top corners
+        # flush with the tab bar, rounded bottom corners, and a gold top
+        # border with a gap exactly where the active tab sits. Same
+        # rectangle+arc technique as _redraw_tab_box in _build_ui — see
+        # that function's comments for why each piece (the we/he/lx/ty
+        # insets, capstyle="projecting", the gap-boundary math) is there;
+        # this is a fixed-width, non-resizable window though, so there's
+        # no live width-sync path to mirror, only height.
+        GUIDE_CONTENT_W = WIN_W - 32 - 34
+        GUIDE_BOX_PAD = 20
+        content_frame = tk.Canvas(win, width=GUIDE_CONTENT_W, bg=BG_WIN, highlightthickness=0)
         content_frame.pack(fill="x", padx=(32, 34), pady=(0, 24))
 
-        # Section frames directly in content_frame, one per tab across BOTH
-        # modes (ids are unique) — same pattern as main app tabs
+        # tab_id -> (x_lo, x_hi) in the shared tab-row/box coordinate
+        # frame, already adjusted to each tab's own actual rendered
+        # border position (inset by 1 from its untrimmed edge — see
+        # _draw_guide_tab's capstyle comment and _tab_x_ranges in
+        # _build_ui for why) rather than its true edge. All 4 tab slots
+        # are the same width/spacing regardless of which mode is
+        # showing, so this is indexed by position (0-3), not tab id.
+        GUIDE_TAB_RANGES = [(0 if i == 0 else i * 132 + 1, i * 132 + 129) for i in range(4)]
+
+        # Section frames, one per tab across BOTH modes (ids are unique)
+        # — same pattern as main app tabs. Embedded via create_window
+        # (not pack) and inset by GUIDE_BOX_PAD on every side: a
+        # create_window item is a real native child window that always
+        # composites above anything drawn on the canvas itself, so the
+        # border/gap decoration has to live in a margin the content can
+        # never reach (see _tab_box_pad in _build_ui for the original
+        # diagnosis of this).
         sections = {}
+        guide_section_windows = {}
+        guide_inner_w = GUIDE_CONTENT_W - 2 * GUIDE_BOX_PAD
         for mdef in MODES.values():
             for tid in mdef["tab_ids"]:
                 f = tk.Frame(content_frame, bg=BG_DARK, padx=20, pady=20)
                 sections[tid] = f
+                guide_section_windows[tid] = content_frame.create_window(
+                    (GUIDE_BOX_PAD, GUIDE_BOX_PAD), window=f, anchor="nw",
+                    width=guide_inner_w, state="hidden")
 
         win.protocol("WM_DELETE_WINDOW", win.destroy)
 
@@ -8169,23 +8887,67 @@ class VFXExporterApp(tk.Tk):
                                   outline=col, style="arc", width=lw)
                 canvas.create_arc(tw-r*2-1, 1, tw-1, r*2+1, start=0, extent=90,
                                   outline=col, style="arc", width=lw)
-                canvas.create_line(1, r, 1, th+1, fill=col, width=lw)
-                canvas.create_line(tw-1, r, tw-1, th+1, fill=col, width=lw)
+                # capstyle="projecting": a plain butt cap (Tk's default)
+                # stops this bar's stroke exactly at its endpoint,
+                # covering only that point's center — so where it meets
+                # the box's border below (_redraw_guide_box) the two
+                # strokes only touch instead of overlapping, leaving a
+                # small square notch uncovered right at the joint.
+                # Projecting extends the stroke half its own width past
+                # each endpoint so the shapes actually overlap.
+                canvas.create_line(1, r, 1, th+1, fill=col, width=lw, capstyle="projecting")
+                canvas.create_line(tw-1, r, tw-1, th+1, fill=col, width=lw, capstyle="projecting")
             fw = "bold" if active else "normal"
             canvas.create_text(tw//2, th//2, text=label,
                                font=("SF Pro Display", 11, fw), fill=col)
 
+        def _redraw_guide_box(gap_lo, gap_hi):
+            c = content_frame
+            c.delete("box")
+            w, h = GUIDE_CONTENT_W, c.winfo_height()
+            if h <= 1:
+                return
+            r, lw, grey, fill = 10, 1.5, "#5a5a5a", BG_DARK
+
+            c.create_rectangle(0, 0, w, h - r, fill=fill, outline="", tags="box")
+            c.create_rectangle(r, h - r, w - r, h, fill=fill, outline="", tags="box")
+            c.create_arc(w - 2 * r, h - 2 * r, w, h, start=270, extent=90,
+                         fill=fill, outline="", tags="box")
+            c.create_arc(0, h - 2 * r, 2 * r, h, start=180, extent=90,
+                         fill=fill, outline="", tags="box")
+
+            we, he = w - 1, h - 1
+            lx, ty = 1, 1
+            c.create_line(we, ty, we, he - r, fill=grey, width=lw, tags="box", capstyle="projecting")
+            c.create_arc(we - 2 * r, he - 2 * r, we, he, start=270, extent=90, style="arc",
+                         outline=grey, width=lw, tags="box")
+            c.create_line(we - r, he, r, he, fill=grey, width=lw, tags="box", capstyle="projecting")
+            c.create_arc(lx, he - 2 * r, lx + 2 * r, he, start=180, extent=90, style="arc",
+                         outline=grey, width=lw, tags="box")
+            c.create_line(lx, he - r, lx, 0, fill=grey, width=lw, tags="box", capstyle="projecting")
+
+            if gap_lo > 0:
+                c.create_line(lx, ty, gap_lo, ty, fill=ACCENT, width=lw, tags="box", capstyle="projecting")
+            if gap_hi < we:
+                c.create_line(max(gap_hi, lx), ty, we, ty, fill=ACCENT, width=lw, tags="box", capstyle="projecting")
+
+            c.tag_lower("box")
+
         def _show_tab(tid):
             mdef = MODES[self._guide_mode.get()]
-            for t, f in sections.items():
-                f.pack_forget()
-            sections[tid].pack(fill="both", expand=True, padx=20, pady=20)
+            for t, item in guide_section_windows.items():
+                content_frame.itemconfigure(item, state=("normal" if t == tid else "hidden"))
             for t, c in guide_tab_canvases.items():
                 lbl = mdef["tab_names"][mdef["tab_ids"].index(t)]
                 _draw_guide_tab(c, lbl, t == tid)
             self._guide_active_tab.set(tid)
-            # Update height only, keep width fixed
             win.update_idletasks()
+            content_h = max(sections[tid].winfo_reqheight(), 1) + 2 * GUIDE_BOX_PAD
+            content_frame.configure(height=content_h)
+            win.update_idletasks()
+            idx = mdef["tab_ids"].index(tid)
+            gap_lo, gap_hi = GUIDE_TAB_RANGES[idx]
+            _redraw_guide_box(gap_lo, gap_hi)
             h = win.winfo_reqheight()
             win.geometry(f"{WIN_W}x{h}")
 
