@@ -1,0 +1,5 @@
+{
+  "version": "1.0.6",
+  "release_notes": "## Fixes\n- Fixed the missing bug report icon not appearing after updating\n- Fixed render presets not being copied to DaVinci when updating, with a warning to restart Resolve if it is already open\n\n## Functionality\n- Added automatic update checking (hourly in the background, plus a manual check from the Finishing Tool menu)\n- Render preset matching is now more flexible about naming, so a slightly different preset name still gets picked up\n- Added a Render Preset picker next to Export that remembers your last choice\n- Added \"Rescan Episodes\" after a scan, so new timeline markers can be picked up without starting over\n\n## Interface\n- Polished rounded corners across the tab panels\n- Redesigned the update notification with rounded corners, padding, and its own Release Notes button\n- Added Preferences, About, an Edit menu, and an expanded Help menu (Release Notes, GitHub link, support folder)\n- Release Notes now open in their own formatted window instead of one dense paragraph",
+  "download_url": "https://raw.githubusercontent.com/esandijp-dotcom/finishing-tool/main/main.py"
+}

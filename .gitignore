@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.DS_Store
+.claude/
+
+# Contains a live GitHub token (used only for reading the private
+# feedback repo) — already uploaded there directly, so it doesn't need
+# to also live in the public finishing-tool repo's history.
+bug_reports.html
