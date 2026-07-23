@@ -79,8 +79,14 @@ _install_distutils_version_shim()
 GITHUB_BASE     = "https://raw.githubusercontent.com/esandijp-dotcom/finishing-tool/main"
 VERSION_URL     = f"{GITHUB_BASE}/version.json"
 DOWNLOAD_URL    = f"{GITHUB_BASE}/main.py"
-# Re-synced on every update alongside main.py — keep this in sync with
-# installer.py's RENDER_PRESET_FILES list (same files, same source of truth).
+# The real, current lists live in version.json's "assets"/"render_presets"
+# fields on GitHub — _do_update reads them from there on every run, so a
+# new bundled file only needs to be added to that JSON (and the repo) to
+# reach every existing install, no main.py code change required. These
+# are fallback defaults only, used if a fetched version.json is ever
+# missing one of those fields (e.g. mid-rollout skew).
+DEFAULT_ASSET_FILES = ["bug_icon.png", "thinking.gif", "LIVE.epr", "MARKETING.epr",
+                        "SOCIAL MEDIA.epr", "LIVE WITH SRTs.epr"]
 RENDER_PRESET_FILES = ["01_STRINGOUT Render.xml", "02_COLORED VFX 4444 XQ Render.xml",
                         "03_PREMIERE XML Render.xml"]
 
@@ -1535,6 +1541,7 @@ class VFXExporterApp(tk.Tk):
             var.trace_add("write", lambda *args: self.after(0, self._update_filename_preview))
 
         self._build_ui()
+        self._prebuild_update_dialog()
         self.after(200, self._disable_reset_btn)
         self._check_deps_on_start()
         self._pp_check_deps_on_start()
@@ -8684,7 +8691,7 @@ class VFXExporterApp(tk.Tk):
                 self.resizable(False, False)
             self.after(50, _update_banner_resize_retry)
 
-    def _update_render_presets(self, ctx, progress_cb=None):
+    def _update_render_presets(self, ctx, filenames=None, progress_cb=None):
         """
         Re-download and re-install the DaVinci render presets alongside a
         main.py update — the auto-updater otherwise only ever touches
@@ -8693,6 +8700,10 @@ class VFXExporterApp(tk.Tk):
         already ran the installer once. Mirrors installer.py's per-file
         copy + size verification so a single failed file doesn't skip the
         rest.
+
+        filenames comes from the remote version.json's "render_presets"
+        list (see _do_update) — falls back to RENDER_PRESET_FILES only if
+        the caller doesn't pass one.
 
         Returns True if Resolve is currently running and therefore won't
         see these updated presets until restarted — it only reads this
@@ -8704,6 +8715,7 @@ class VFXExporterApp(tk.Tk):
         presets aren't showing up in DaVinci" turned out to be.
         """
         import urllib.request, urllib.parse
+        filenames = filenames or RENDER_PRESET_FILES
         resolve_presets_dir = os.path.expanduser(
             "~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Presets/Render")
         try:
@@ -8713,8 +8725,8 @@ class VFXExporterApp(tk.Tk):
             return False
 
         failures = []
-        total = len(RENDER_PRESET_FILES)
-        for i, fname in enumerate(RENDER_PRESET_FILES):
+        total = len(filenames)
+        for i, fname in enumerate(filenames):
             if progress_cb:
                 progress_cb(i, total, fname)
             url = f"{GITHUB_BASE}/{urllib.parse.quote(fname)}"
@@ -8747,15 +8759,38 @@ class VFXExporterApp(tk.Tk):
                        "the updated presets (it only reads this folder on launch).", "warn")
         return running
 
-    def _open_update_progress_dialog(self, remote_version):
-        """Builds the modal shown while _do_update runs — a 3-step
-        checklist (download / install presets / restart), a real
+    def _prebuild_update_dialog(self):
+        """Builds the modal shown while _do_update runs — a real
         ttk.Progressbar (same style as the VFX tab's — square corners,
-        no rounding, "clam" theme), and a status line, so an update no
-        longer looks like the app just silently hangs for a few seconds
-        before closing and reopening. Not closable mid-update (the ✕/red
-        traffic-light click is swallowed) — quitting partway through
-        could leave main.py half-written."""
+        no rounding, "clam" theme) and a status line describing exactly
+        what's happening — and does so ONCE, synchronously here in
+        __init__, before self.mainloop() is ever called externally.
+        _open_update_progress_dialog only resets and reveals this same
+        widget tree later; it never builds a new one.
+
+        That split is load-bearing, not stylistic. Extensive testing
+        (isolated repro scripts, bisecting this app's widget tree,
+        canvases, style names, threading pattern, forced redraws — see
+        git history / prior investigation notes for the full trail)
+        converged on one exact rule: a ttk.Progressbar created AFTER
+        self.mainloop() has started, then driven through a real,
+        wall-clock-spaced .set() sequence (i.e. exactly what
+        _do_update's real network/file I/O produces), renders its final
+        state as flat grey instead of ACCENT on this macOS Tk build.
+        One created before mainloop() starts never shows this, no
+        matter how it's later driven or how much time passes before
+        it's revealed. It doesn't matter whether the widget lives in a
+        Toplevel or the main window — only whether the widget itself
+        existed before mainloop() began. Building this dialog's real
+        widget tree here and merely deiconify()-ing it later is what
+        keeps it on the working side of that line.
+
+        Not closable mid-update (the ✕/red traffic-light click is
+        swallowed) — quitting partway through could leave main.py
+        half-written. Deliberately has no step-circle checklist — an
+        earlier version's tk.Canvas widgets were a separate, since-
+        fixed cause of the same grey-render symptom; the status line
+        already names each phase more precisely than a checklist would."""
         import tkinter.font as tkfont
         dlg = tk.Toplevel(self)
         dlg.withdraw()
@@ -8770,70 +8805,38 @@ class VFXExporterApp(tk.Tk):
 
         tk.Label(body, text="Updating Finishing Tool", font=("SF Pro Display", 16, "bold"),
                  bg=BG_DARK, fg=ACCENT, anchor="w").pack(anchor="w")
-        tk.Label(body, text=f"Installing version {remote_version}", font=FONT_SMALL,
+        subtitle_var = tk.StringVar(value="")
+        tk.Label(body, textvariable=subtitle_var, font=FONT_SMALL,
                  bg=BG_DARK, fg=TEXT_MUTED, anchor="w").pack(anchor="w", pady=(0, 12))
         tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=(0, 14))
 
-        steps_frame = tk.Frame(body, bg=BG_DARK, width=332)
-        steps_frame.pack(fill="x", pady=(0, 16))
-        step_widgets = []
-        for text in ("Downloading update files", "Installing render presets",
-                      "Restarting Finishing Tool"):
-            row = tk.Frame(steps_frame, bg=BG_DARK)
-            row.pack(fill="x", pady=4)
-            circ = tk.Canvas(row, width=18, height=18, bg=BG_DARK, highlightthickness=0)
-            circ.pack(side="left", padx=(0, 10))
-            lbl = tk.Label(row, text=text, font=FONT_LABEL, bg=BG_DARK, fg=TEXT_MUTED, anchor="w")
-            lbl.pack(side="left")
-            step_widgets.append((circ, lbl))
+        # A fixed-width, invisible spacer — with the step checklist gone,
+        # nothing else in this dialog has an explicit width, so without
+        # this the dialog would size itself to whatever's packed (title/
+        # subtitle text), and status_lbl's STATUS_MAX_W truncation below
+        # would no longer match the dialog's actual width, letting long
+        # status text grow the window again.
+        tk.Frame(body, bg=BG_DARK, width=332, height=1).pack()
 
-        # Same three states/colors _set_step_done / _set_step_active /
-        # _step_circle already use for the VFX/Episode Export step
-        # circles — outline-only grey when pending, a solid ACCENT fill
-        # when active, and an outlined TEXT_SUCCESS ring with a "✓" glyph
-        # (not hand-drawn checkmark lines) once done, so this dialog's
-        # checklist reads as the same visual language, not a lookalike.
-        def _set_step(idx, state):
-            circ, lbl = step_widgets[idx]
-            circ.delete("all")
-            size = 18
-            if state == "done":
-                circ.create_oval(1, 1, size - 1, size - 1, outline=TEXT_SUCCESS, width=2, fill="")
-                circ.create_text(size // 2, size // 2, text="✓",
-                                  font=("SF Pro Display", 10, "bold"), fill=TEXT_SUCCESS)
-                lbl.config(fg=TEXT_PRIMARY)
-            elif state == "active":
-                circ.create_oval(1, 1, size - 1, size - 1, outline=ACCENT, width=2, fill=ACCENT)
-                lbl.config(fg=TEXT_PRIMARY)
-            else:
-                circ.create_oval(1, 1, size - 1, size - 1, outline="#555555", width=2, fill="")
-                lbl.config(fg=TEXT_MUTED)
-        for i in range(3):
-            _set_step(i, "pending")
-
-        # Hand-drawn instead of ttk.Progressbar — the ttk/"clam" fill
-        # turned out to intermittently render as flat light grey instead
-        # of ACCENT at larger widths (confirmed live: reproducible at
-        # some percentages, not others, with no consistent threshold —
-        # looks like a theme-engine rendering quirk, not anything wrong
-        # with the style options themselves). A plain Canvas rectangle
-        # has no theme engine in the way, so it can't have that failure
-        # mode; same visual (square corners, BORDER-outlined trough,
-        # ACCENT fill) as the ttk version was aiming for.
-        PBAR_W, PBAR_H = 332, 10
-        pbar_canvas = tk.Canvas(body, width=PBAR_W, height=PBAR_H, bg=BG_DARK, highlightthickness=0)
-        pbar_canvas.pack(pady=(0, 8))
-        pbar_canvas.create_rectangle(0, 0, PBAR_W - 1, PBAR_H - 1, fill=BG_INPUT, outline=BORDER)
-        pbar_fill_id = pbar_canvas.create_rectangle(0, 0, 0, PBAR_H - 1, fill=ACCENT, outline="")
-
-        def _set_progress(pct):
-            w = max(0, min(PBAR_W - 1, int((PBAR_W - 1) * max(0, min(100, pct)) / 100)))
-            pbar_canvas.coords(pbar_fill_id, 0, 0, w, PBAR_H - 1)
+        # Same ttk.Progressbar the rest of the app uses, built the exact
+        # same (odd-looking but load-bearing) way the VFX tab's own bar
+        # is: a throwaway Progressbar is created BEFORE theme_use/
+        # style.configure ever run, then the real one is created AFTER —
+        # see main.py's VFX progress bar setup, same pattern.
+        pbar_var = tk.DoubleVar(value=0)
+        _throwaway_pbar = ttk.Progressbar(body, variable=pbar_var, maximum=100, mode="determinate")
+        pb_style = ttk.Style()
+        pb_style.theme_use("clam")
+        pb_style.configure("Update.Horizontal.TProgressbar", troughcolor=BG_INPUT,
+                            background=ACCENT, borderwidth=0, thickness=10)
+        pbar = ttk.Progressbar(body, variable=pbar_var, maximum=100, mode="determinate",
+                                style="Update.Horizontal.TProgressbar")
+        pbar.pack(fill="x", pady=(0, 8))
 
         # Status text is the only thing in this dialog that changes
         # length at runtime (preset filenames especially) — truncating it
-        # to the same fixed width as steps_frame keeps the dialog's own
-        # width locked instead of growing/shrinking the window every
+        # to the same fixed width as the spacer above keeps the dialog's
+        # own width locked instead of growing/shrinking the window every
         # time a longer or shorter message comes through.
         status_var = tk.StringVar(value="")
         status_lbl = tk.Label(body, textvariable=status_var, font=FONT_SMALL, bg=BG_DARK,
@@ -8855,13 +8858,28 @@ class VFXExporterApp(tk.Tk):
                  font=("SF Pro Display", 10), bg=BG_DARK, fg="#666666",
                  anchor="w").pack(anchor="w")
 
+        self._update_dlg = dlg
+        self._update_subtitle_var = subtitle_var
+        self._update_pbar_var = pbar_var
+        self._update_set_status = _set_status
+        self._update_set_progress = lambda pct: pbar_var.set(max(0, min(100, pct)))
+
+    def _open_update_progress_dialog(self, remote_version):
+        """Resets and reveals the dialog _prebuild_update_dialog already
+        built — see that method's docstring for why this never builds a
+        fresh widget tree here."""
+        dlg = self._update_dlg
+        self._update_subtitle_var.set(f"Installing version {remote_version}")
+        self._update_pbar_var.set(0)
+        self._update_set_status("")
+
         dlg.update_idletasks()
         x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_reqwidth()) // 2
         y = self.winfo_rooty() + (self.winfo_height() - dlg.winfo_reqheight()) // 2
         dlg.geometry(f"+{x}+{y}")
         dlg.deiconify()
         dlg.grab_set()
-        return dlg, _set_step, _set_progress, _set_status
+        return dlg, self._update_set_progress, self._update_set_status
 
     def _do_update(self, remote_version, download_url):
         """Downloads and installs the update on a background thread —
@@ -8870,13 +8888,13 @@ class VFXExporterApp(tk.Tk):
         seconds with no feedback before restarting. Every Tk touch below
         (dialog updates, alerts, the eventual restart) is marshaled back
         via self.after(0, ...) since Tkinter itself isn't thread-safe."""
-        dlg, set_step, set_progress, set_status = self._open_update_progress_dialog(remote_version)
+        dlg, set_progress, set_status = self._open_update_progress_dialog(remote_version)
 
         def _ui(fn):
             self.after(0, fn)
 
         def task():
-            import urllib.request, ssl
+            import urllib.request, urllib.parse, ssl, json
             try:
                 ctx = ssl.create_default_context()
                 ctx.check_hostname = False
@@ -8886,41 +8904,54 @@ class VFXExporterApp(tk.Tk):
                 resources_dir = os.path.dirname(script_path)
                 vpath = os.path.join(resources_dir, "version.json")
 
-                _ui(lambda: (set_step(0, "active"), set_progress(5),
-                             set_status("Downloading version info…")))
+                _ui(lambda: (set_progress(5), set_status("Downloading version info…")))
                 vreq = urllib.request.urlopen(VERSION_URL, context=ctx, timeout=30)
+                vbytes = vreq.read()
                 with open(vpath, "wb") as f:
-                    f.write(vreq.read())
+                    f.write(vbytes)
+                # The manifest itself drives which files get pulled below —
+                # any file added to "assets"/"render_presets" here reaches
+                # every existing install on its next update, no main.py
+                # code change required. Falls back to the hardcoded
+                # defaults only if a fetched version.json is malformed or
+                # missing a field, so a bad manifest can't silently drop
+                # coverage below what this version already guarantees.
+                try:
+                    remote_manifest = json.loads(vbytes)
+                except Exception:
+                    remote_manifest = {}
+                asset_files = remote_manifest.get("assets", DEFAULT_ASSET_FILES)
+                render_preset_files = remote_manifest.get("render_presets", RENDER_PRESET_FILES)
 
                 _ui(lambda: (set_progress(20), set_status("Downloading main.py…")))
                 req = urllib.request.urlopen(download_url, context=ctx, timeout=30)
                 with open(script_path, "wb") as f:
                     f.write(req.read())
 
-                # bug_icon.png — a static asset next to main.py, not part
-                # of the versioned code, so it needs its own explicit
-                # fetch here; installs that predate this icon existing in
-                # the repo would otherwise update main.py forever and
-                # never pick it up. Non-fatal: the bug button already
-                # falls back to a plain "!" if this file is missing.
-                _ui(lambda: (set_progress(45), set_status("Downloading bug icon…")))
-                try:
-                    ireq = urllib.request.urlopen(f"{GITHUB_BASE}/bug_icon.png", context=ctx, timeout=30)
-                    with open(os.path.join(resources_dir, "bug_icon.png"), "wb") as f:
-                        f.write(ireq.read())
-                except Exception as e:
-                    self._log(f"  ✗ bug_icon.png: {e}", "warn")
-
-                _ui(lambda: set_step(0, "done"))
-                _ui(lambda: set_step(1, "active"))
+                # Static assets bundled next to main.py (icons, gifs, AME
+                # .epr presets, etc.) — not part of main.py itself, so each
+                # needs its own fetch. Non-fatal per-file: a missing/failed
+                # asset shouldn't block the rest of the update, the same
+                # way a missing bug_icon.png already just falls back to a
+                # plain "!" instead of breaking anything.
+                total_assets = len(asset_files)
+                for i, fname in enumerate(asset_files):
+                    pct = 20 + int((i / max(total_assets, 1)) * 25)
+                    _ui(lambda p=pct, n=fname: (set_progress(p), set_status(f"Downloading {n}…")))
+                    try:
+                        areq = urllib.request.urlopen(f"{GITHUB_BASE}/{urllib.parse.quote(fname)}",
+                                                        context=ctx, timeout=30)
+                        with open(os.path.join(resources_dir, fname), "wb") as f:
+                            f.write(areq.read())
+                    except Exception as e:
+                        self._log(f"  ✗ {fname}: {e}", "warn")
 
                 def _preset_progress(i, total, fname):
                     pct = 55 + int((i / total) * 40)
                     _ui(lambda p=pct, n=fname: (set_progress(p), set_status(f"Installing {n}…")))
-                resolve_needs_restart = self._update_render_presets(ctx, progress_cb=_preset_progress)
+                resolve_needs_restart = self._update_render_presets(
+                    ctx, filenames=render_preset_files, progress_cb=_preset_progress)
 
-                _ui(lambda: set_step(1, "done"))
-                _ui(lambda: set_step(2, "active"))
                 _ui(lambda: (set_progress(100), set_status("Restarting…")))
 
                 self._log(f"✓ Updated to v{remote_version}. Restarting...", "success")
@@ -8950,23 +8981,22 @@ class VFXExporterApp(tk.Tk):
                     self.after(500, self.destroy)
 
                 def _finish():
-                    set_step(2, "done")
-                    def _proceed():
-                        if resolve_needs_restart:
-                            self._pp_alert_dialog(
-                                "DaVinci Resolve Needs Restarting",
-                                "Updated render presets were just installed, but Resolve "
-                                "only reads that folder on launch and is currently open — "
-                                "restart DaVinci Resolve before your next VFX export, or "
-                                "it'll still be using the old presets.")
-                        dlg.destroy()
-                        _restart()
-                    self.after(800, _proceed)
-                _ui(_finish)
+                    if resolve_needs_restart:
+                        self._pp_alert_dialog(
+                            "DaVinci Resolve Needs Restarting",
+                            "Updated render presets were just installed, but Resolve "
+                            "only reads that folder on launch and is currently open — "
+                            "restart DaVinci Resolve before your next VFX export, or "
+                            "it'll still be using the old presets.")
+                    dlg.grab_release()
+                    dlg.withdraw()
+                    _restart()
+                _ui(lambda: self.after(800, _finish))
             except Exception as e:
                 msg = str(e)
                 def _fail():
-                    dlg.destroy()
+                    dlg.grab_release()
+                    dlg.withdraw()
                     self._log(f"✗ Update failed: {msg}", "error")
                     self._pp_alert_dialog("Update Failed", f"Couldn't complete the update: {msg}")
                 _ui(_fail)
