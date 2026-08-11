@@ -3,6 +3,12 @@ __pycache__/
 .DS_Store
 .claude/
 
+# Local build/run environment — ~190MB of installed libraries, rebuilt from
+# scratch by build_and_install.sh whenever it's missing. Never belongs in git.
+.venv/
+build/
+dist/
+
 # Contains a live GitHub token (used only for reading the private
 # feedback repo) — already uploaded there directly, so it doesn't need
 # to also live in the public finishing-tool repo's history.

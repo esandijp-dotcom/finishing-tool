@@ -190,6 +190,54 @@ def _load_local_version_info():
     return best_version, best_notes, best_path
 
 
+def _describe_path(path):
+    """Why one candidate version.json didn't work, in plain words.
+
+    "missing", "there but unreadable" and "there but not valid JSON" have
+    completely different causes and identical symptoms from the outside, so
+    About reports the distinction rather than just "not found"."""
+    import json as _json
+    try:
+        if os.path.isdir(path):
+            return "is a folder, not a file"
+        if not os.path.exists(path):
+            parent = os.path.dirname(path)
+            if not os.path.isdir(parent):
+                return "missing — the containing folder doesn't exist either"
+            return "missing — folder exists, file doesn't"
+        with open(path) as f:
+            data = _json.load(f)
+        raw = data.get("version")
+        if _parse_version(raw) is None:
+            return f"present, but version is {raw!r}"
+        return f"present and readable, version {raw}"
+    except PermissionError:
+        return "exists but isn't readable (permissions)"
+    except Exception as e:
+        return f"exists but couldn't be parsed — {type(e).__name__}: {e}"
+
+
+def _mirror_version_to_support(source_path):
+    """Copy a version.json that WAS readable into Application Support.
+
+    Runs at startup, not only during an update, so an install whose only
+    good copy lives inside the .app bundle gets a durable one immediately —
+    the bundle copy is destroyed by any rebuild and can't be written on a
+    read-only bundle. Best-effort and silent: this is a resilience measure,
+    and failing to make a backup copy is never worth interrupting launch."""
+    try:
+        target = os.path.join(SUPPORT_DIR, "version.json")
+        if os.path.abspath(source_path) == os.path.abspath(target):
+            return
+        os.makedirs(SUPPORT_DIR, exist_ok=True)
+        with open(source_path, "rb") as src:
+            payload = src.read()
+        with open(target, "wb") as dst:
+            dst.write(payload)
+    except Exception:
+        pass
+
+
 _local_version, APP_RELEASE_NOTES, APP_VERSION_PATH = _load_local_version_info()
 APP_VERSION_KNOWN = _local_version is not None
 # Display string only. Every f"v{APP_VERSION}" site renders this, so an
@@ -198,6 +246,12 @@ APP_VERSION_KNOWN = _local_version is not None
 # APP_VERSION_TUPLE, never this.
 APP_VERSION = _local_version if APP_VERSION_KNOWN else "unknown"
 APP_VERSION_TUPLE = _parse_version(_local_version)
+
+# Make a readable version durable straight away rather than waiting for the
+# next update to mirror it — an install whose only good copy is inside the
+# bundle is one rebuild away from not knowing its own version again.
+if APP_VERSION_PATH:
+    _mirror_version_to_support(APP_VERSION_PATH)
 # ─────────────────────────────────────────────────────────────────────────────
 import re
 import subprocess
@@ -9387,16 +9441,19 @@ class VFXExporterApp(tk.Tk):
 
     def _show_about_dialog(self):
         message = f"Version {APP_VERSION}"
-        # Which version.json the number actually came from. Without this,
-        # diagnosing a wrong/unknown version means digging around inside the
-        # .app bundle from a terminal — which isn't always possible on the
-        # machine showing the problem.
+        # Which version.json the number came from, and — when none of them
+        # worked — every path that was tried and what was wrong with each.
+        # "unknown" on its own says the lookup failed but not why, and the
+        # machine showing the problem can't always be inspected from a
+        # terminal, so the paths have to be readable from inside the app.
         if APP_VERSION_PATH:
             message += f"\nRead from: {APP_VERSION_PATH}"
         else:
-            message += ("\nNo readable version.json was found next to the app, "
-                        "in the bundle's Resources folder, or in Application "
-                        "Support. Reinstalling will repair it.")
+            message += "\n\nNo readable version.json. Paths tried:"
+            for path in _version_file_candidates():
+                message += f"\n  • {path}\n      {_describe_path(path)}"
+            message += f"\n\nRunning from: {os.path.abspath(__file__)}"
+            message += f"\nExecutable:   {sys.executable}"
         if APP_RELEASE_NOTES:
             message += f"\n\n{APP_RELEASE_NOTES}"
         self._pp_alert_dialog("Finishing Tool", message)
