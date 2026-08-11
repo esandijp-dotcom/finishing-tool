@@ -5257,6 +5257,7 @@ class VFXExporterApp(tk.Tk):
                     _status(f"Enabled + targeted {v_count} video + {a_count} audio track(s).", TEXT_MUTED)
                 except Exception:
                     _status(f"⚠ Track-enable step returned unexpected result: {enabled_counts!r}", TEXT_WARN)
+                _status(f"   after un-mute/target → {self._pp_read_video_mute_states(seq)}", TEXT_MUTED)
 
                 if not mute_ref:
                     _status("Skipped muting master clips (per your choice) — all tracks left as-is.", TEXT_MUTED)
@@ -5288,6 +5289,13 @@ class VFXExporterApp(tk.Tk):
                                 ref_track_idx = t2
                                 ref_clip_name = cname
                                 break
+                        # The break above only exits the CLIP loop. Without
+                        # this second break the track loop kept climbing, so
+                        # ref_track_idx ended up the HIGHEST matching track
+                        # below the title card instead of the first one found
+                        # — silently muting more tracks than intended.
+                        if ref_track_idx is not None:
+                            break
 
                     # Mute that track and every track below it (Track.setMute — the
                     # whole-track toggle, not a per-clip one); leave everything above
@@ -5304,6 +5312,7 @@ class VFXExporterApp(tk.Tk):
                         _es(f"var __s={seq_ref};"
                             f"for(var t=0;t<={ref_track_idx};t++){{__s.videoTracks[t].setMute(1);}}")
                         _status(f"Muted V1–V{ref_track_idx + 1}.", TEXT_MUTED)
+                        _status(f"   after mute → {self._pp_read_video_mute_states(seq)}", TEXT_MUTED)
                         reel["setup_done"] = True
                     else:
                         _status("⚠ No reference track found below title card track — nothing muted.", TEXT_WARN)
@@ -5447,6 +5456,16 @@ class VFXExporterApp(tk.Tk):
                     sub.projectItem.moveBin(output_bin)
                 except Exception as e:
                     _status(f"⚠ Couldn't move {name}: {e}", TEXT_WARN)
+                # Once per reel, read the brand-new subsequence's own track
+                # mute states straight back out of Premiere. The mute step
+                # above assumes muting the stringout carries into every
+                # subsequence made from it; nothing has ever verified that.
+                # If this prints all zeros while the stringout readback showed
+                # a muted range, the assumption is false and the mute has to be
+                # applied per-subsequence instead.
+                if not created:
+                    _status(f"   {name} tracks → {self._pp_read_video_mute_states(sub)}",
+                            TEXT_MUTED)
                 created.append(name)
                 if existing_matches:
                     # overwrite_queue is True here — the False case already
@@ -6009,11 +6028,35 @@ class VFXExporterApp(tk.Tk):
             track = seq.videoTracks[t]
             for c in range(track.clips.numItems):
                 name = str(track.clips[c].name or "").strip()
-                if name.lower().startswith("watermark"):
+                if self._pp_name_is_watermark(name):
+                    self._pp_log(f"  Watermark track V{t + 1} found on "
+                                 f"{seq.name} ('{name}').", "muted")
                     return t
         self._pp_log(f"  ⚠ No Watermark clip found on {seq.name} — "
                       f"Social Media export will run without it.", "warn")
         return None
+
+    @staticmethod
+    def _pp_name_is_watermark(name):
+        """True when a clip name refers to the Watermark overlay.
+
+        This used to be `name.lower().startswith("watermark")`, which only
+        ever matched a bare "Watermark.png" — anything following the show's
+        own naming convention (e.g. "AT03_TPKR_WATERMARK.png") failed, and a
+        miss is not a no-op: _pp_apply_variant_mute_state unmutes every video
+        track as its baseline and only re-mutes the watermark when this
+        returns a track, so a failed match left the watermark VISIBLE on
+        LIVE, MARKETING and the _SM (no-watermark) variant alike.
+
+        Matched by stripping separators and looking for "watermark" anywhere
+        — same tolerant approach already used for "picloc" in the reference
+        track scan, and the reason _pp_find_music_track's segment-based "mx"
+        match works where this one didn't. "watermark" is distinctive enough
+        that a substring test carries no realistic false-positive risk."""
+        flat = str(name or "").lower()
+        for sep in (" ", "_", "-", "."):
+            flat = flat.replace(sep, "")
+        return "watermark" in flat
 
     def _pp_find_marketing_trim_point(self, seq):
         """Earliest start tick, across every video track, of a clip whose
@@ -6057,6 +6100,25 @@ class VFXExporterApp(tk.Tk):
                 variants.append(("SOCIAL MEDIA", "_SM", "social_muted"))
                 variants.append(("SOCIAL MEDIA", "_SM_WM", "social_unmuted"))
         return variants
+
+    def _pp_read_video_mute_states(self, seq_obj):
+        """Every video track's ACTUAL mute state (Track.isMuted), read back
+        out of Premiere rather than inferred from what we just asked it to
+        do — "V1=0 V2=0 V3=1 ...", 1 meaning muted.
+
+        Diagnostic only, and deliberately swallows everything: a readback
+        must never be able to take a nest run down with it."""
+        try:
+            from pymiere.core import eval_script as _es
+            ref = "$._pymiere['{}']".format(seq_obj._pymiere_id)
+            raw = _es(f"var __s={ref}; var __r=[];"
+                      "for(var t=0;t<__s.videoTracks.numTracks;t++){"
+                      "__r.push(__s.videoTracks[t].isMuted()?1:0);}"
+                      "__r.join(',');", decode_json=False)
+            states = str(raw).strip().split(",")
+            return " ".join(f"V{i + 1}={s}" for i, s in enumerate(states) if s != "")
+        except Exception as e:
+            return f"(readback failed: {e})"
 
     def _pp_set_track_muted(self, seq_obj, track_type, track_idx, muted):
         """Sets a single track's own mute state directly (Track.setMute) —
