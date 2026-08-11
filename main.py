@@ -108,31 +108,96 @@ FEEDBACK_TOKEN = base64.b64decode(
     "Z2l0aHViX3BhdF8xMUNHT0xWS1EwaWFoakRxclMwUTRUX2FIMGMxN2tFZUJZS2ZSUGJOWUtjanNOR0drR3BXdVRjUFZFTzBYQTV4bTQyRkQ1NVZBT2UyWU9mQXp6"
 ).decode()
 
-def _load_local_version():
-    """Read version from version.json next to this script."""
+SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/Finishing Tool")
+
+
+def _version_file_candidates():
+    """Every place version.json can legitimately live, highest-trust first.
+
+    This used to be a single path — version.json next to main.py — and when
+    that read failed the loader quietly returned the string "1.0". A made-up
+    version is indistinguishable from a real one, so a missing file presented
+    itself as "you are running v1.0": the header showed v1.0 permanently, and
+    the update check (remote > local) stayed true against every release, so
+    the update banner came back after every successful install, forever.
+
+    The Application Support copy matters because the other two live INSIDE the
+    .app bundle: writing there fails on a read-only or signed bundle, and a
+    rebuild replaces the bundle wholesale. The updater now mirrors version.json
+    to Application Support — the same directory settings.json already uses
+    precisely because the updater never touches it."""
+    paths = []
     try:
-        import json as _json
-        _vpath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "version.json")
-        with open(_vpath) as _f:
-            return _json.load(_f).get("version", "1.0")
+        paths.append(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "version.json"))
     except Exception:
-        return "1.0"
-
-APP_VERSION = _load_local_version()
-
-def _load_local_release_notes():
-    """Read this installed version's release notes from version.json
-    next to this script — same file/shape _load_local_version reads,
-    just the other field."""
+        pass
+    # py2app runs the app from Contents/Resources, but __file__ can resolve
+    # into a zipped module path rather than that directory, in which case the
+    # candidate above points somewhere with no version.json next to it. Derive
+    # Resources from the executable as well rather than trusting __file__.
     try:
-        import json as _json
-        _vpath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "version.json")
-        with open(_vpath) as _f:
-            return _json.load(_f).get("release_notes", "")
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        if os.path.basename(exe_dir) == "MacOS":
+            paths.append(os.path.join(os.path.dirname(exe_dir), "Resources",
+                                      "version.json"))
     except Exception:
-        return ""
+        pass
+    paths.append(os.path.join(SUPPORT_DIR, "version.json"))
+    seen, unique = set(), []
+    for p in paths:
+        if p and p not in seen:
+            seen.add(p)
+            unique.append(p)
+    return unique
 
-APP_RELEASE_NOTES = _load_local_release_notes()
+
+def _parse_version(v):
+    """"1.0.8" -> (1, 0, 8), or None if it isn't a version at all.
+
+    None means "unknown", which callers must treat differently from (0,) — an
+    unknown local version compared as (0,) is older than every release, which
+    is exactly what made the update banner un-dismissable."""
+    try:
+        parts = [int(x) for x in str(v).strip().split(".")]
+    except Exception:
+        return None
+    return tuple(parts) if parts else None
+
+
+def _load_local_version_info():
+    """(version, release_notes, path) from whichever readable version.json
+    reports the highest version, or (None, "", None) if none can be read.
+
+    Deliberately returns None rather than inventing a version string — see
+    _version_file_candidates for what that cost."""
+    import json as _json
+    best_version, best_notes, best_path, best_key = None, "", None, None
+    for path in _version_file_candidates():
+        try:
+            with open(path) as f:
+                data = _json.load(f)
+        except Exception:
+            continue
+        key = _parse_version(data.get("version"))
+        if key is None:
+            continue
+        if best_key is None or key > best_key:
+            best_version = str(data.get("version"))
+            best_notes = data.get("release_notes", "")
+            best_path = path
+            best_key = key
+    return best_version, best_notes, best_path
+
+
+_local_version, APP_RELEASE_NOTES, APP_VERSION_PATH = _load_local_version_info()
+APP_VERSION_KNOWN = _local_version is not None
+# Display string only. Every f"v{APP_VERSION}" site renders this, so an
+# unreadable version.json now reads as "unknown" instead of silently claiming
+# a version the app is not running. Version COMPARISONS must use
+# APP_VERSION_TUPLE, never this.
+APP_VERSION = _local_version if APP_VERSION_KNOWN else "unknown"
+APP_VERSION_TUPLE = _parse_version(_local_version)
 # ─────────────────────────────────────────────────────────────────────────────
 import re
 import subprocess
@@ -8535,11 +8600,31 @@ class VFXExporterApp(tk.Tk):
                 data = json.loads(req.read().decode())
                 remote = data.get("version", "0")
                 notes  = data.get("release_notes", "")
-                def _parse(v):
-                    try: return tuple(int(x) for x in v.split("."))
-                    except: return (0,)
-                if _parse(remote) > _parse(APP_VERSION):
-                    self.after(0, lambda: self._show_update_banner(remote, notes, data.get("download_url", DOWNLOAD_URL)))
+                remote_key = _parse_version(remote)
+                url = data.get("download_url", DOWNLOAD_URL)
+
+                # An unknown local version is NOT "older than everything".
+                # Treating it that way (the old _parse fallback of (0,)) meant
+                # a machine that couldn't read its own version.json was told
+                # an update was available every single hour, including
+                # immediately after installing that exact update — the banner
+                # could never be satisfied. When the version is unknown, the
+                # automatic path stays silent and only a deliberate manual
+                # check offers the reinstall, which is also what repairs it
+                # (the updater mirrors version.json to Application Support).
+                if not APP_VERSION_KNOWN:
+                    if manual and remote_key is not None:
+                        self.after(0, lambda: self._show_update_banner(remote, notes, url))
+                    elif manual:
+                        self.after(0, lambda: self._pp_alert_dialog(
+                            "Version Unknown",
+                            "Couldn't read this install's version.json, so there's no "
+                            "way to tell whether an update is needed.\n\nReinstalling the "
+                            "latest version will repair it."))
+                    return
+
+                if remote_key is not None and remote_key > APP_VERSION_TUPLE:
+                    self.after(0, lambda: self._show_update_banner(remote, notes, url))
                 elif manual:
                     self.after(0, lambda: self._pp_alert_dialog(
                         "Up to Date", f"You're already running the latest version (v{APP_VERSION})."))
@@ -8969,8 +9054,27 @@ class VFXExporterApp(tk.Tk):
                 _ui(lambda: (set_progress(5), set_status("Downloading version info…")))
                 vreq = urllib.request.urlopen(VERSION_URL, context=ctx, timeout=30)
                 vbytes = vreq.read()
-                with open(vpath, "wb") as f:
-                    f.write(vbytes)
+                # Written to BOTH the bundle and Application Support. The
+                # bundle copy is the natural home but is not guaranteed
+                # writable (a read-only or signed .app) and is destroyed by
+                # any rebuild; when it silently failed, the app came back up
+                # unable to read its own version and re-offered this same
+                # update forever. Application Support always survives both,
+                # and _version_file_candidates reads it as a fallback — so
+                # this write is what actually makes an update stick.
+                wrote_any = False
+                for target in (vpath, os.path.join(SUPPORT_DIR, "version.json")):
+                    try:
+                        os.makedirs(os.path.dirname(target), exist_ok=True)
+                        with open(target, "wb") as f:
+                            f.write(vbytes)
+                        wrote_any = True
+                    except Exception:
+                        continue
+                if not wrote_any:
+                    raise RuntimeError(
+                        "Couldn't write version.json to the app bundle or to "
+                        "Application Support — the update would not stick.")
                 # The manifest itself drives which files get pulled below —
                 # any file added to "assets"/"render_presets" here reaches
                 # every existing install on its next update, no main.py
@@ -9283,6 +9387,16 @@ class VFXExporterApp(tk.Tk):
 
     def _show_about_dialog(self):
         message = f"Version {APP_VERSION}"
+        # Which version.json the number actually came from. Without this,
+        # diagnosing a wrong/unknown version means digging around inside the
+        # .app bundle from a terminal — which isn't always possible on the
+        # machine showing the problem.
+        if APP_VERSION_PATH:
+            message += f"\nRead from: {APP_VERSION_PATH}"
+        else:
+            message += ("\nNo readable version.json was found next to the app, "
+                        "in the bundle's Resources folder, or in Application "
+                        "Support. Reinstalling will repair it.")
         if APP_RELEASE_NOTES:
             message += f"\n\n{APP_RELEASE_NOTES}"
         self._pp_alert_dialog("Finishing Tool", message)
