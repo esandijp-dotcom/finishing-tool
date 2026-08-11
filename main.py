@@ -110,6 +110,22 @@ FEEDBACK_TOKEN = base64.b64decode(
 
 SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/Finishing Tool")
 
+# The version of THIS file, and the authoritative answer to "what am I
+# running". It lives in the code because main.py is precisely what the updater
+# replaces, so it cannot be lost, cannot be out of sync with the running code,
+# and needs no path resolution to find.
+#
+# version.json is a MANIFEST — what the latest release is and what files it
+# ships — not a record of what is currently executing. Treating it as the
+# latter meant the app had to locate a second file at runtime to know its own
+# identity, and when that lookup failed (which it did, in a bundle layout that
+# still hasn't been pinned down) the version was simply unknowable. Reading it
+# is now an enrichment step for release notes, never the source of truth.
+#
+# MUST be bumped together with version.json's "version" on every release. A
+# drift between the two is surfaced by APP_MANIFEST_MATCHES and shown in About.
+APP_VERSION_BUILTIN = "1.0.11"
+
 
 def _version_file_candidates():
     """Every place version.json can legitimately live, highest-trust first.
@@ -238,18 +254,23 @@ def _mirror_version_to_support(source_path):
         pass
 
 
-_local_version, APP_RELEASE_NOTES, APP_VERSION_PATH = _load_local_version_info()
-APP_VERSION_KNOWN = _local_version is not None
-# Display string only. Every f"v{APP_VERSION}" site renders this, so an
-# unreadable version.json now reads as "unknown" instead of silently claiming
-# a version the app is not running. Version COMPARISONS must use
-# APP_VERSION_TUPLE, never this.
-APP_VERSION = _local_version if APP_VERSION_KNOWN else "unknown"
-APP_VERSION_TUPLE = _parse_version(_local_version)
+_manifest_version, APP_RELEASE_NOTES, APP_VERSION_PATH = _load_local_version_info()
 
-# Make a readable version durable straight away rather than waiting for the
-# next update to mirror it — an install whose only good copy is inside the
-# bundle is one rebuild away from not knowing its own version again.
+# Always known — it's a literal in this file. The version is no longer
+# something that can fail to load.
+APP_VERSION = APP_VERSION_BUILTIN
+APP_VERSION_TUPLE = _parse_version(APP_VERSION_BUILTIN)
+APP_VERSION_KNOWN = APP_VERSION_TUPLE is not None
+
+# Kept only so About can report whether the manifest agrees with the running
+# code. A mismatch means the updater replaced main.py but its version.json
+# write landed somewhere this app doesn't read from — which matters beyond the
+# version number, since the same write path also delivers the bundled assets
+# (bug icon, thinking animation, AME presets).
+APP_MANIFEST_VERSION = _manifest_version
+APP_MANIFEST_MATCHES = (_parse_version(_manifest_version) == APP_VERSION_TUPLE
+                        if _manifest_version else False)
+
 if APP_VERSION_PATH:
     _mirror_version_to_support(APP_VERSION_PATH)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -9441,15 +9462,24 @@ class VFXExporterApp(tk.Tk):
 
     def _show_about_dialog(self):
         message = f"Version {APP_VERSION}"
-        # Which version.json the number came from, and — when none of them
-        # worked — every path that was tried and what was wrong with each.
-        # "unknown" on its own says the lookup failed but not why, and the
-        # machine showing the problem can't always be inspected from a
-        # terminal, so the paths have to be readable from inside the app.
-        if APP_VERSION_PATH:
-            message += f"\nRead from: {APP_VERSION_PATH}"
+        # The version above always resolves now. What can still go wrong is the
+        # updater's version.json/asset writes landing somewhere this app never
+        # reads — so About reports whether the manifest agrees with the running
+        # code, and when it doesn't, every path tried and what was wrong with
+        # each. The machine showing the problem can't always be inspected from
+        # a terminal, so this has to be legible from inside the app.
+        if APP_MANIFEST_MATCHES:
+            message += f"\nManifest agrees — read from: {APP_VERSION_PATH}"
         else:
-            message += "\n\nNo readable version.json. Paths tried:"
+            if APP_MANIFEST_VERSION:
+                message += (f"\n\n⚠ version.json says {APP_MANIFEST_VERSION}, but this "
+                            f"code is {APP_VERSION}.\nRead from: {APP_VERSION_PATH}")
+            else:
+                message += "\n\n⚠ No readable version.json."
+            message += ("\nThe app itself is fine, but the updater's file writes "
+                        "may not be reaching it — that same path also delivers the "
+                        "bug icon, thinking animation and AME presets.")
+            message += "\n\nPaths tried:"
             for path in _version_file_candidates():
                 message += f"\n  • {path}\n      {_describe_path(path)}"
             message += f"\n\nRunning from: {os.path.abspath(__file__)}"
