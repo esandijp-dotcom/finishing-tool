@@ -124,7 +124,7 @@ SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/Finishing Tool")
 #
 # MUST be bumped together with version.json's "version" on every release. A
 # drift between the two is surfaced by APP_MANIFEST_MATCHES and shown in About.
-APP_VERSION_BUILTIN = "1.0.15"
+APP_VERSION_BUILTIN = "1.0.16"
 
 
 def _version_file_candidates():
@@ -2054,14 +2054,34 @@ class VFXExporterApp(tk.Tk):
             self._test_canvas.itemconfig(self._test_canvas_window, width=event.width)
         self._test_canvas.bind("<Configure>", _test_canvas_configure)
 
+        # Bound once, for the lifetime of the window, rather than on
+        # <Enter>/<Leave> of the wrapper frame. Tk fires <Leave> on a
+        # container as soon as the pointer moves onto one of its CHILDREN,
+        # and this frame is entirely covered by them — so the wheel binding
+        # was being torn down the instant the pointer touched anything
+        # inside it, which is to say almost immediately. That's why the
+        # scrollbar appeared but the wheel did nothing.
+        #
+        # Guarded on the Episode Export tab being the active one instead:
+        # bind_all is global, so without that check the wheel would scroll
+        # this canvas while the VFX tab is showing.
         def _test_mousewheel(event):
-            self._test_canvas.yview_scroll(int(-1 * (event.delta)), "units")
-        def _test_bind_wheel(_):
-            self.bind_all("<MouseWheel>", _test_mousewheel)
-        def _test_unbind_wheel(_):
-            self.unbind_all("<MouseWheel>")
-        self._test_scroll_wrap.bind("<Enter>", _test_bind_wheel)
-        self._test_scroll_wrap.bind("<Leave>", _test_unbind_wheel)
+            if getattr(self, "_active_tab", None) != "test":
+                return
+            if not self._test_canvas.winfo_ismapped():
+                return
+            # The log box scrolls itself through Tk's built-in Text class
+            # binding, which runs before this bind_all and doesn't stop it —
+            # so without this, scrolling the log would scroll the page behind
+            # it at the same time.
+            hovered = self.winfo_containing(event.x_root, event.y_root)
+            if isinstance(hovered, tk.Text):
+                return
+            first, last = self._test_scrollbar.get()
+            if first <= 0.0 and last >= 1.0:
+                return  # nothing to scroll — let the event fall through
+            self._test_canvas.yview_scroll(int(-1 * event.delta), "units")
+        self.bind_all("<MouseWheel>", _test_mousewheel)
 
         self._test_scroll_wrap_window = self.tab_content_frame.create_window(
             (self._tab_box_pad, self._tab_box_pad), window=self._test_scroll_wrap,
@@ -3009,6 +3029,10 @@ class VFXExporterApp(tk.Tk):
                 pc.configure(yscrollcommand=sb.set)
                 def _wheel(e):
                     pc.yview_scroll(int(-1 * (e.delta)), "units")
+                    # Stops here. The tab's own wheel handler is a bind_all,
+                    # which would otherwise ALSO fire and scroll the page
+                    # behind this popup while scrolling inside it.
+                    return "break"
                 pc.bind("<MouseWheel>", _wheel)
                 sb.bind("<MouseWheel>", _wheel)
                 total_w = popup_w + sb_w
@@ -7007,16 +7031,12 @@ class VFXExporterApp(tk.Tk):
             c.create_text(glyph_zone + (cw-glyph_zone)//2, ch//2, text=ep_label,
                           font=("SF Pro Display", 10, "bold"), fill=text_fill, tags="txt")
 
+            c._ep_name = name
+            c._ep_interactive = interactive
             if interactive:
-                def _on_click(e, n=name):
-                    if self._pp_exp_started or n in self._pp_exp_queued:
-                        return
-                    if n in self._pp_exp_disabled:
-                        self._pp_exp_disabled.discard(n)
-                    else:
-                        self._pp_exp_disabled.add(n)
-                    self._pp_build_exp_chips()
-                c.bind("<ButtonRelease-1>", _on_click)
+                c.bind("<ButtonPress-1>", self._pp_chip_drag_start)
+                c.bind("<B1-Motion>", self._pp_chip_drag_move)
+                c.bind("<ButtonRelease-1>", self._pp_chip_drag_end)
             self._pp_exp_chip_canvases.append(c)
         # Keep the DISABLE ALL/ENABLE ALL label truthful to what's actually
         # on screen — derived from the chips every rebuild instead of only
@@ -7035,6 +7055,82 @@ class VFXExporterApp(tk.Tk):
         self._pp_refresh_exp_clear_buttons()
         self._pp_refresh_exp_util_buttons()
         self._pp_resize_window()
+
+    def _pp_paint_exp_chip(self, canvas, disabled):
+        """Recolours one export chip in place for a disabled/enabled state.
+
+        Drag-toggling can't call _pp_build_exp_chips per chip the way a
+        single click does — that destroys and recreates every chip canvas,
+        including the one currently under the pointer, which kills the drag
+        mid-gesture. The full rebuild happens once, on release."""
+        if disabled:
+            fill, text_fill = self.EXP_DISABLED_BG, self.EXP_DISABLED_TXT
+            glyph = "⊘" if self._pp_exp_started else "+"
+        else:
+            fill, text_fill = self.EXP_READY_BG, self.EXP_READY_TXT
+            glyph = "×"
+        canvas.itemconfig("bg", fill=fill, outline="")
+        canvas.itemconfig("glyph", text=glyph, fill=text_fill)
+        canvas.itemconfig("div", fill=text_fill)
+        canvas.itemconfig("txt", fill=text_fill)
+
+    def _pp_chip_toggleable(self, canvas):
+        """The chip's episode name if it can currently be toggled, else None."""
+        name = getattr(canvas, "_ep_name", None)
+        if name is None or not getattr(canvas, "_ep_interactive", False):
+            return None
+        if self._pp_exp_started or name in self._pp_exp_queued:
+            return None
+        return name
+
+    def _pp_chip_drag_start(self, event):
+        """Press on a chip: flip it, and remember which direction we flipped
+        so dragging across others applies the SAME state rather than toggling
+        each one. Toggling per chip would make a drag across a mixed
+        selection invert it rather than set it, which is never what's
+        wanted — this is the standard paint-a-selection behaviour."""
+        name = self._pp_chip_toggleable(event.widget)
+        if name is None:
+            self._pp_chip_drag_state = None
+            return
+        target_disabled = name not in self._pp_exp_disabled
+        self._pp_chip_drag_state = target_disabled
+        self._pp_chip_drag_touched = {name}
+        if target_disabled:
+            self._pp_exp_disabled.add(name)
+        else:
+            self._pp_exp_disabled.discard(name)
+        self._pp_paint_exp_chip(event.widget, target_disabled)
+
+    def _pp_chip_drag_move(self, event):
+        """Drag across chips. The pointer is resolved to a widget via
+        winfo_containing rather than the event widget, because Tk delivers
+        motion events to the widget the press started on, not whatever is
+        currently under the cursor."""
+        target = getattr(self, "_pp_chip_drag_state", None)
+        if target is None:
+            return
+        widget = self.winfo_containing(event.x_root, event.y_root)
+        if widget is None:
+            return
+        name = self._pp_chip_toggleable(widget)
+        if name is None or name in self._pp_chip_drag_touched:
+            return
+        self._pp_chip_drag_touched.add(name)
+        if target:
+            self._pp_exp_disabled.add(name)
+        else:
+            self._pp_exp_disabled.discard(name)
+        self._pp_paint_exp_chip(widget, target)
+
+    def _pp_chip_drag_end(self, event):
+        """One real rebuild at the end, which refreshes the DISABLE ALL /
+        ENABLE ALL label and the util buttons off the final state."""
+        if getattr(self, "_pp_chip_drag_state", None) is None:
+            return
+        self._pp_chip_drag_state = None
+        self._pp_chip_drag_touched = set()
+        self._pp_build_exp_chips()
 
     def _pp_refresh_exp_util_buttons(self):
         """Greys out DISABLE ALL/ENABLE ALL and CLEAR ALL whenever there's
