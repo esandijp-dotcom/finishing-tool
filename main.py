@@ -124,7 +124,7 @@ SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/Finishing Tool")
 #
 # MUST be bumped together with version.json's "version" on every release. A
 # drift between the two is surfaced by APP_MANIFEST_MATCHES and shown in About.
-APP_VERSION_BUILTIN = "1.0.21"
+APP_VERSION_BUILTIN = "1.0.22"
 
 
 def _version_file_candidates():
@@ -6821,56 +6821,104 @@ class VFXExporterApp(tk.Tk):
     # would be on the master timeline, so a simpler position-relative scan
     # (relative to a "_COLOR" reference clip) is enough to find it.
 
-    def _pp_find_color_ref_track(self, seq):
+    def _pp_batch_track_clip_names(self, seq_obj, track_type):
+        """[[clip name, ...], ...] for every track of the given type, in ONE
+        call. track_type is "videoTracks" or "audioTracks".
+
+        Every finder below used to read clip names one at a time, which is a
+        separate round trip each — and they run per item PER STYLE during a
+        queue run, which is what made queueing pause between episodes.
+
+        Returns None if the batched read fails, so callers fall back."""
+        try:
+            from pymiere.core import eval_script as _es
+            import urllib.parse
+            ref = "$._pymiere['{}']".format(seq_obj._pymiere_id)
+            raw = _es(
+                f"var __tt={ref}.{track_type}; var __o=[];"
+                "for(var t=0;t<__tt.numTracks;t++){"
+                "var __tr=__tt[t]; var __n=[];"
+                "for(var c=0;c<__tr.clips.numItems;c++){"
+                "__n.push(encodeURIComponent(String(__tr.clips[c].name)));}"
+                "__o.push(__n.join(','));}"
+                "__o.join(';');",
+                decode_json=False)
+            text = str(raw)
+            if not text:
+                return []
+            return [[urllib.parse.unquote(n) for n in rec.split(",") if n]
+                    for rec in text.split(";")]
+        except Exception:
+            return None
+
+    def _pp_set_track_range_muted(self, seq_obj, track_type, start, end, muted):
+        """Mute/unmute a contiguous track range in one call. end=None means
+        "to the last track". Replaces per-track setMute round trips."""
+        from pymiere.core import eval_script as _es
+        ref = "$._pymiere['{}']".format(seq_obj._pymiere_id)
+        val = 1 if muted else 0
+        limit = "__tt.numTracks" if end is None else str(int(end) + 1)
+        _es(f"var __tt={ref}.{track_type};"
+            f"for(var t={int(start)};t<{limit};t++){{__tt[t].setMute({val});}}")
+
+    def _pp_unmute_all_tracks(self, seq_obj):
+        """Every video AND audio track unmuted in a single call.
+
+        This is the baseline every export variant starts from, and it ran as
+        one setMute round trip per track — roughly two dozen per item, per
+        style, before the item was even handed to AME. That is the gap
+        between one episode appearing in Media Encoder and the next."""
+        try:
+            from pymiere.core import eval_script as _es
+            ref = "$._pymiere['{}']".format(seq_obj._pymiere_id)
+            _es(f"var __s={ref};"
+                "for(var t=0;t<__s.videoTracks.numTracks;t++){__s.videoTracks[t].setMute(0);}"
+                "for(var t=0;t<__s.audioTracks.numTracks;t++){__s.audioTracks[t].setMute(0);}")
+            return True
+        except Exception:
+            return False
+
+    def _pp_find_color_ref_track(self, names):
         """Video track index containing a clip with "_COLOR" in its name —
         the reference point the lower-third titlecards track is found
-        relative to (it sits somewhere above this)."""
-        num_tracks = seq.videoTracks.numTracks
-        for t in range(num_tracks):
-            track = seq.videoTracks[t]
-            for c in range(track.clips.numItems):
-                name = str(track.clips[c].name or "")
-                if "_color" in name.lower():
-                    return t
+        relative to (it sits somewhere above this). Takes prefetched
+        per-track clip names rather than reading Premiere itself."""
+        for t, clips in enumerate(names):
+            if any("_color" in str(n).lower() for n in clips):
+                return t
         return None
 
-    def _pp_find_lower_third_track(self, seq):
+    def _pp_find_lower_third_track(self, names):
         """Video track above the _COLOR reference clip's track where every
         one of the first 4 clips is a "Graphic" (MOGRT) clip — the
         lower-third character-name-card track MARKETING/SOCIAL MEDIA need
         kept visible."""
-        color_track = self._pp_find_color_ref_track(seq)
+        color_track = self._pp_find_color_ref_track(names)
         if color_track is None:
             return None
-        num_tracks = seq.videoTracks.numTracks
-        for t in range(color_track + 1, num_tracks):
-            track = seq.videoTracks[t]
-            n_clips = track.clips.numItems
-            if n_clips == 0:
+        for t in range(color_track + 1, len(names)):
+            clips = names[t]
+            if not clips:
                 continue
-            sample = min(4, n_clips)
-            names = [str(track.clips[c].name or "").strip().upper() for c in range(sample)]
-            if names and all(n == "GRAPHIC" for n in names):
+            sample = [str(n).strip().upper() for n in clips[:4]]
+            if sample and all(n == "GRAPHIC" for n in sample):
                 return t
         return None
 
-    def _pp_find_music_track(self, seq):
+    def _pp_find_music_track(self, names):
         """Audio track containing a clip with "mx" in its name (matched as
         an underscore-delimited segment, same convention as REF detection,
         to avoid matching an unrelated clip that merely contains "mx"
         somewhere in a longer word) — one matching clip is enough to call
         the whole track Music."""
-        num_tracks = seq.audioTracks.numTracks
-        for t in range(num_tracks):
-            track = seq.audioTracks[t]
-            for c in range(track.clips.numItems):
-                name = str(track.clips[c].name or "")
-                parts = name.lower().split("_")
+        for t, clips in enumerate(names):
+            for name in clips:
+                parts = str(name).lower().split("_")
                 if any(p == "mx" or p.startswith("mx") for p in parts):
                     return t
         return None
 
-    def _pp_find_watermark_track(self, seq):
+    def _pp_find_watermark_track(self, names, seq_name=""):
         """Video track containing a clip whose name starts with "watermark"
         (case-insensitive, stripped) — the overlay track SOCIAL MEDIA's two
         variants (_SM / _SM_WM) toggle on and off. The real clip is a .png
@@ -6882,16 +6930,14 @@ class VFXExporterApp(tk.Tk):
         inside a NESTED sequence on that track rather than as a direct
         top-level clip, which this scan — top-level clips only — wouldn't
         see)."""
-        num_tracks = seq.videoTracks.numTracks
-        for t in range(num_tracks):
-            track = seq.videoTracks[t]
-            for c in range(track.clips.numItems):
-                name = str(track.clips[c].name or "").strip()
+        for t, clips in enumerate(names):
+            for raw in clips:
+                name = str(raw).strip()
                 if self._pp_name_is_watermark(name):
                     self._pp_log(f"  Watermark track V{t + 1} found on "
-                                 f"{seq.name} ('{name}').", "muted")
+                                 f"{seq_name} ('{name}').", "muted")
                     return t
-        self._pp_log(f"  ⚠ No Watermark clip found on {seq.name} — "
+        self._pp_log(f"  ⚠ No Watermark clip found on {seq_name} — "
                       f"Social Media export will run without it.", "warn")
         return None
 
@@ -7056,22 +7102,38 @@ class VFXExporterApp(tk.Tk):
         style pass otherwise) instead of running it unconditionally and
         relying on _pp_find_watermark_track returning None as a no-op
         for every regular episode, every single pass."""
-        num_video = sub.videoTracks.numTracks
-        num_audio = sub.audioTracks.numTracks
-        if num_video > 0:
-            self._pp_set_video_tracks_muted_upto(sub, num_video - 1, False)
-        if num_audio > 0:
-            self._pp_set_audio_tracks_muted_from(sub, 0, False)
+        # One call for the whole baseline instead of one per track. This runs
+        # for every item in every style pass, so it was the bulk of the wait
+        # between episodes appearing in Media Encoder. The track counts are
+        # only read on the fallback path — reading them up front was itself
+        # two more round trips per item that the batched call doesn't need.
+        if not self._pp_unmute_all_tracks(sub):
+            num_video = sub.videoTracks.numTracks
+            num_audio = sub.audioTracks.numTracks
+            if num_video > 0:
+                self._pp_set_video_tracks_muted_upto(sub, num_video - 1, False)
+            if num_audio > 0:
+                self._pp_set_audio_tracks_muted_from(sub, 0, False)
+
+        # Clip names are read once per track type here and handed to every
+        # finder, rather than each finder walking the timeline itself.
+        needs_video_names = (style == "MARKETING") or is_trailer
+        video_names = (self._pp_batch_track_clip_names(sub, "videoTracks")
+                       if needs_video_names else None)
+
         if style == "MARKETING":
-            music_track = self._pp_find_music_track(sub)
+            audio_names = self._pp_batch_track_clip_names(sub, "audioTracks") or []
+            music_track = self._pp_find_music_track(audio_names)
             if music_track is not None:
-                self._pp_set_audio_tracks_muted_from(sub, music_track, True)
-            lower_third_track = self._pp_find_lower_third_track(sub)
+                self._pp_set_track_range_muted(sub, "audioTracks", music_track,
+                                               None, True)
+            lower_third_track = self._pp_find_lower_third_track(video_names or [])
             if lower_third_track is not None:
                 self._pp_set_track_muted(sub, "videoTracks", lower_third_track, True)
         if not is_trailer:
             return
-        watermark_track = self._pp_find_watermark_track(sub)
+        watermark_track = self._pp_find_watermark_track(video_names or [],
+                                                        seq_name=sub.name)
         if watermark_track is not None:
             # Logged so it's visible (not silent) whether it was found and
             # which way it got set, since a wrong mute state here is easy

@@ -1,6 +1,6 @@
 {
-  "version": "1.0.21",
-  "release_notes": "## Fixes\n- The STOP button's label is white again instead of greyed out. Turning RESET ALL into STOP goes through the same code that greys the button out first, and only the background was being repainted afterwards — so a perfectly clickable STOP was drawn with disabled-looking text. Hovering and pressing it keep the label white too",
+  "version": "1.0.22",
+  "release_notes": "## Queueing to Media Encoder is much faster\n- The pause you saw after each episode appeared in Media Encoder was the app preparing the NEXT one. Before handing an episode over it resets every track's mute state, and it was doing that one track at a time — roughly two dozen separate requests to Premiere per episode, per version. That is now a single request\n- MARKETING and the Social Media watermark had the same problem finding the Music, lower-third and Watermark tracks: every clip on every track was read individually. Each is now read in one pass\n- For a plain LIVE export that takes an episode from about two dozen requests down to one",
   "download_url": "https://raw.githubusercontent.com/esandijp-dotcom/finishing-tool/main/main.py",
   "assets": [
     "bug_icon.png",
