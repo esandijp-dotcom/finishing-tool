@@ -1,6 +1,6 @@
 {
-  "version": "1.0.16",
-  "release_notes": "## Add or remove several episodes at once\n- Click and drag across the EXPORT QUEUE chips to add or remove a run of episodes in one gesture. Whichever way the first chip flips is applied to every chip you drag over, so dragging across a mix of added and removed episodes sets them all the same way rather than inverting each one\n- A plain click still toggles a single chip exactly as before\n\n## Fixes\n- The mouse wheel now scrolls the Episode Export tab. The wheel was bound when the pointer entered the tab area and unbound when it left — but that also counts as leaving the moment the pointer moves onto anything inside it, so it was being switched off almost immediately and the scrollbar could only be dragged by hand\n- Scrolling inside the log box, or inside a dropdown that has its own scrollbar, no longer scrolls the page behind it at the same time",
+  "version": "1.0.17",
+  "release_notes": "## Drag to add or remove episodes on the VFX tab too\n- The DETECTED EPISODES tags now click-and-drag exactly like the EXPORT QUEUE chips added in 1.0.16: whichever way the first tag flips is applied to every tag you drag across, so dragging over a mix sets them all the same way instead of inverting each one\n- A plain click still toggles a single tag, and tags stay locked while an export is running",
   "download_url": "https://raw.githubusercontent.com/esandijp-dotcom/finishing-tool/main/main.py",
   "assets": [
     "bug_icon.png",

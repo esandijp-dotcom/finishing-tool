@@ -124,7 +124,7 @@ SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/Finishing Tool")
 #
 # MUST be bumped together with version.json's "version" on every release. A
 # drift between the two is surfaced by APP_MANIFEST_MATCHES and shown in About.
-APP_VERSION_BUILTIN = "1.0.16"
+APP_VERSION_BUILTIN = "1.0.17"
 
 
 def _version_file_candidates():
@@ -7033,6 +7033,7 @@ class VFXExporterApp(tk.Tk):
 
             c._ep_name = name
             c._ep_interactive = interactive
+            c._ep_group = "exp"
             if interactive:
                 c.bind("<ButtonPress-1>", self._pp_chip_drag_start)
                 c.bind("<B1-Motion>", self._pp_chip_drag_move)
@@ -7056,13 +7057,33 @@ class VFXExporterApp(tk.Tk):
         self._pp_refresh_exp_util_buttons()
         self._pp_resize_window()
 
+    def _chip_group(self, canvas):
+        """(disabled_set, paint_fn, rebuild_fn) for whichever chip grid a
+        canvas belongs to, or None if it isn't a draggable chip.
+
+        Both the VFX tab's DETECTED EPISODES tags and the Episode Export
+        tab's EXPORT QUEUE chips are the same interaction over different
+        state, so the drag handlers below are shared and only the group
+        differs. Each canvas carries its own group tag so a single set of
+        bindings can serve both."""
+        group = getattr(canvas, "_ep_group", None)
+        if group == "exp":
+            return (self._pp_exp_disabled, self._pp_paint_exp_chip,
+                    self._pp_build_exp_chips)
+        if group == "vfx":
+            def _rebuild():
+                self._update_episode_list()
+                self._update_plate_count()
+            return (self._disabled_episodes, self._paint_vfx_tag, _rebuild)
+        return None
+
     def _pp_paint_exp_chip(self, canvas, disabled):
         """Recolours one export chip in place for a disabled/enabled state.
 
-        Drag-toggling can't call _pp_build_exp_chips per chip the way a
-        single click does — that destroys and recreates every chip canvas,
-        including the one currently under the pointer, which kills the drag
-        mid-gesture. The full rebuild happens once, on release."""
+        Drag-toggling can't rebuild per chip the way a single click does —
+        that destroys and recreates every chip canvas, including the one
+        currently under the pointer, which kills the drag mid-gesture. The
+        full rebuild happens once, on release."""
         if disabled:
             fill, text_fill = self.EXP_DISABLED_BG, self.EXP_DISABLED_TXT
             glyph = "⊘" if self._pp_exp_started else "+"
@@ -7074,12 +7095,31 @@ class VFXExporterApp(tk.Tk):
         canvas.itemconfig("div", fill=text_fill)
         canvas.itemconfig("txt", fill=text_fill)
 
+    def _paint_vfx_tag(self, canvas, disabled):
+        """The DETECTED EPISODES equivalent of _pp_paint_exp_chip. Different
+        palette (accent-filled when enabled, not green) but the same idea."""
+        if getattr(self, "_export_started", False):
+            fill = "#3d3d3d" if disabled else "#5a4a1a"
+            text_fill = "#888888" if disabled else "#666666"
+            glyph = "⊘"
+        else:
+            fill = "#3d3d3d" if disabled else ACCENT
+            text_fill = "#888888" if disabled else "#000000"
+            glyph = "+" if disabled else "×"
+        canvas.itemconfig("bg", fill=fill, outline="")
+        canvas.itemconfig("glyph", text=glyph, fill=text_fill)
+        canvas.itemconfig("div", fill=text_fill)
+        canvas.itemconfig("txt", fill=text_fill)
+
     def _pp_chip_toggleable(self, canvas):
-        """The chip's episode name if it can currently be toggled, else None."""
+        """The chip's episode key if it can currently be toggled, else None."""
         name = getattr(canvas, "_ep_name", None)
         if name is None or not getattr(canvas, "_ep_interactive", False):
             return None
-        if self._pp_exp_started or name in self._pp_exp_queued:
+        if getattr(canvas, "_ep_group", None) == "exp":
+            if self._pp_exp_started or name in self._pp_exp_queued:
+                return None
+        elif getattr(self, "_export_started", False):
             return None
         return name
 
@@ -7090,17 +7130,23 @@ class VFXExporterApp(tk.Tk):
         selection invert it rather than set it, which is never what's
         wanted — this is the standard paint-a-selection behaviour."""
         name = self._pp_chip_toggleable(event.widget)
-        if name is None:
+        group = self._chip_group(event.widget)
+        if name is None or group is None:
             self._pp_chip_drag_state = None
             return
-        target_disabled = name not in self._pp_exp_disabled
+        disabled_set, paint, _rebuild = group
+        target_disabled = name not in disabled_set
         self._pp_chip_drag_state = target_disabled
         self._pp_chip_drag_touched = {name}
+        # A drag can't wander between the two grids — they're on different
+        # tabs — but pinning the group at press time keeps the release
+        # rebuilding the grid the gesture actually started in.
+        self._pp_chip_drag_group = getattr(event.widget, "_ep_group", None)
         if target_disabled:
-            self._pp_exp_disabled.add(name)
+            disabled_set.add(name)
         else:
-            self._pp_exp_disabled.discard(name)
-        self._pp_paint_exp_chip(event.widget, target_disabled)
+            disabled_set.discard(name)
+        paint(event.widget, target_disabled)
 
     def _pp_chip_drag_move(self, event):
         """Drag across chips. The pointer is resolved to a widget via
@@ -7113,15 +7159,21 @@ class VFXExporterApp(tk.Tk):
         widget = self.winfo_containing(event.x_root, event.y_root)
         if widget is None:
             return
+        if getattr(widget, "_ep_group", None) != getattr(self, "_pp_chip_drag_group", None):
+            return
         name = self._pp_chip_toggleable(widget)
         if name is None or name in self._pp_chip_drag_touched:
             return
+        group = self._chip_group(widget)
+        if group is None:
+            return
+        disabled_set, paint, _rebuild = group
         self._pp_chip_drag_touched.add(name)
         if target:
-            self._pp_exp_disabled.add(name)
+            disabled_set.add(name)
         else:
-            self._pp_exp_disabled.discard(name)
-        self._pp_paint_exp_chip(widget, target)
+            disabled_set.discard(name)
+        paint(widget, target)
 
     def _pp_chip_drag_end(self, event):
         """One real rebuild at the end, which refreshes the DISABLE ALL /
@@ -7130,7 +7182,10 @@ class VFXExporterApp(tk.Tk):
             return
         self._pp_chip_drag_state = None
         self._pp_chip_drag_touched = set()
-        self._pp_build_exp_chips()
+        group = self._chip_group(event.widget)
+        self._pp_chip_drag_group = None
+        if group is not None:
+            group[2]()
 
     def _pp_refresh_exp_util_buttons(self):
         """Greys out DISABLE ALL/ENABLE ALL and CLEAR ALL whenever there's
@@ -11542,24 +11597,29 @@ class VFXExporterApp(tk.Tk):
                 pts = [x1+r,y1, x2-r,y1, x2,y1, x2,y1+r,
                        x2,y2-r, x2,y2, x2-r,y2, x1+r,y2,
                        x1,y2, x1,y2-r, x1,y1+r, x1,y1]
-                tag.create_polygon(pts, fill=tag_fill, outline="", smooth=True)
+                # Tagged so a drag can recolour them in place — rebuilding
+                # per chip would destroy the canvas under the pointer and
+                # kill the gesture. See _paint_vfx_tag.
+                tag.create_polygon(pts, fill=tag_fill, outline="", smooth=True,
+                                   tags="bg")
                 tag.create_text(12, th//2, text=toggle_char,
-                               font=("SF Pro Display", 12, "bold"), fill=text_fill)
-                tag.create_line(22, 4, 22, th-4, fill=text_fill)
+                               font=("SF Pro Display", 12, "bold"), fill=text_fill,
+                               tags="glyph")
+                tag.create_line(22, 4, 22, th-4, fill=text_fill, tags="div")
                 tag.create_text(22 + (tw-22)//2, th//2, text=ep,
-                               font=("SF Pro Display", 10, "bold"), fill=text_fill)
+                               font=("SF Pro Display", 10, "bold"), fill=text_fill,
+                               tags="txt")
 
-                def _on_click(e, episode=ep):
-                    if getattr(self, '_export_started', False):
-                        return  # Locked during export
-                    if episode in self._disabled_episodes:
-                        self._disabled_episodes.discard(episode)
-                    else:
-                        self._disabled_episodes.add(episode)
-                    self._update_episode_list()
-                    self._update_plate_count()
-
-                tag.bind("<ButtonRelease-1>", _on_click)
+                # Same click-and-drag handlers as the EXPORT QUEUE chips —
+                # press sets a direction, dragging applies it to everything
+                # crossed. A plain click still toggles one tag.
+                tag._ep_name = ep
+                tag._ep_interactive = not locked
+                tag._ep_group = "vfx"
+                if not locked:
+                    tag.bind("<ButtonPress-1>", self._pp_chip_drag_start)
+                    tag.bind("<B1-Motion>", self._pp_chip_drag_move)
+                    tag.bind("<ButtonRelease-1>", self._pp_chip_drag_end)
                 self._ep_tag_widgets.append(tag)
             self._refresh_toggle_all_btn()
 
