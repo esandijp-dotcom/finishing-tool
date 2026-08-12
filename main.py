@@ -124,7 +124,7 @@ SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/Finishing Tool")
 #
 # MUST be bumped together with version.json's "version" on every release. A
 # drift between the two is surfaced by APP_MANIFEST_MATCHES and shown in About.
-APP_VERSION_BUILTIN = "1.0.18"
+APP_VERSION_BUILTIN = "1.0.19"
 
 
 def _version_file_candidates():
@@ -2065,27 +2065,63 @@ class VFXExporterApp(tk.Tk):
         # Guarded on the Episode Export tab being the active one instead:
         # bind_all is global, so without that check the wheel would scroll
         # this canvas while the VFX tab is showing.
-        def _test_mousewheel(event):
+        def _test_scroll_allowed(event):
+            """Shared guard for both scroll events."""
             if getattr(self, "_active_tab", None) != "test":
-                return
+                return False
             if not self._test_canvas.winfo_ismapped():
-                return
+                return False
             # The log box scrolls itself through Tk's built-in Text class
             # binding, which runs before this bind_all and doesn't stop it —
             # so without this, scrolling the log would scroll the page behind
             # it at the same time.
             hovered = self.winfo_containing(event.x_root, event.y_root)
             if isinstance(hovered, tk.Text):
-                return
+                return False
             # yview(), not the scrollbar's get(): _make_scrollbar returns a
             # custom-drawn Canvas (it only implements .set, to receive
             # yscrollcommand), so calling .get() on it raised on every wheel
             # event and the scroll never happened.
             first, last = self._test_canvas.yview()
             if first <= 0.0 and last >= 1.0:
-                return  # nothing to scroll — let the event fall through
+                return False  # nothing to scroll
+            return True
+
+        def _test_mousewheel(event):
+            if not _test_scroll_allowed(event):
+                return
             self._test_canvas.yview_scroll(int(-1 * event.delta), "units")
+
+        def _test_touchpad_scroll(event):
+            """Two-finger trackpad scrolling.
+
+            Tk 8.7+/9 delivers trackpad gestures as <TouchpadScroll>, NOT
+            <MouseWheel> — so on those builds the wheel binding above never
+            fires for a trackpad at all, which is exactly how this looked:
+            the scrollbar worked when dragged, and two fingers did nothing.
+            (A real mouse wheel still sends <MouseWheel>, and Tk 8.6 sends it
+            for trackpads too, so both bindings are needed.)
+
+            %D packs deltaX and deltaY into one integer. tk::PreciseScrollDeltas
+            is Tk's own unpacker; the manual fallback mirrors its source
+            exactly — deltaX is the HIGH 16 bits and deltaY the low ones, which
+            is the opposite of the order the name suggests."""
+            if not _test_scroll_allowed(event):
+                return
+            try:
+                _dx, dy = self.tk.call("tk::PreciseScrollDeltas", event.delta)
+                dy = int(dy)
+            except Exception:
+                low = int(event.delta) & 0xFFFF
+                dy = low if low < 0x8000 else low - 0x10000
+            if dy:
+                self._test_canvas.yview_scroll(-dy, "units")
+
         self.bind_all("<MouseWheel>", _test_mousewheel)
+        try:
+            self.bind_all("<TouchpadScroll>", _test_touchpad_scroll)
+        except tk.TclError:
+            pass  # Tk 8.6 and earlier have no such event; MouseWheel covers it
 
         self._test_scroll_wrap_window = self.tab_content_frame.create_window(
             (self._tab_box_pad, self._tab_box_pad), window=self._test_scroll_wrap,
@@ -4830,9 +4866,18 @@ class VFXExporterApp(tk.Tk):
         project can easily push total sequence count into the hundreds.
         Only the (usually much smaller) set of actual matches costs a
         Python-side round trip after that, to fetch a live Sequence object
-        usable with deleteSequence()."""
-        return [(name, self._pp_sequence_at(idx))
-                for name, idx in self._pp_scan_project_final_ep_entries()]
+        usable with deleteSequence().
+
+        Goes through _pp_existing_final_ep_names, so it gets the fast bin read
+        and only falls back to the treePath scan when the bin can't be found."""
+        names = self._pp_existing_final_ep_names()
+        name_to_idx = self._pp_sequence_indices_by_names(names)
+        out = []
+        for nm in names:
+            idx = name_to_idx.get(nm)
+            if idx is not None:
+                out.append((nm, self._pp_sequence_at(idx)))
+        return out
 
     def _pp_scan_project_final_ep_entries(self):
         """[(name, sequence_index), ...] for the same FINAL_EP sequences
@@ -4874,6 +4919,95 @@ class VFXExporterApp(tk.Tk):
             return entries
         except Exception:
             return []
+
+    def _pp_existing_final_ep_names(self):
+        """Names of already-nested FINAL_EP episodes — the fast bin read,
+        falling back to the old whole-project treePath scan when the
+        DELIVERY > FINAL bin can't be found."""
+        names = self._pp_scan_final_ep_names()
+        if names is not None:
+            return names
+        return [nm for nm, _ in self._pp_scan_project_final_ep_entries()]
+
+    def _pp_scan_final_ep_names(self):
+        """Names of the FINAL_EP sequences sitting directly in DELIVERY >
+        FINAL, in one call and without ever reading projectItem.treePath.
+
+        treePath is what made the existing-episode check slow: reading it
+        rebuilds an item's entire bin ancestry as a string, and the previous
+        scan asked for it once per already-nested episode. Still only one
+        round trip, but 60-90 tree walks inside Premiere — and it walked every
+        sequence in the project to find them.
+
+        Going to the FINAL bin and reading its own children answers the same
+        question directly. Anything filed inside an Archive sub-bin is not a
+        direct child, so it stays excluded exactly as it was before.
+
+        Returns None — NOT an empty list — when the bin can't be located, so
+        the caller falls back to the old scan instead of mistaking "couldn't
+        find the bin" for "no episodes exist", which would silently skip
+        collision detection and overwrite without asking."""
+        from pymiere.core import eval_script as _es
+        import urllib.parse
+        try:
+            raw = _es(
+                "function __find(p,n){var c=p.children;"
+                "for(var i=0;i<c.numItems;i++){"
+                "if(String(c[i].name||'').toUpperCase().indexOf(n)!==-1)return c[i];}"
+                "return null;}"
+                "var __d=__find(app.project.rootItem,'DELIVERY');"
+                "var __r='!';"
+                "if(__d){var __f=__find(__d,'FINAL');"
+                "if(__f){var __o=[];var __c=__f.children;"
+                "for(var i=0;i<__c.numItems;i++){"
+                "var __nm=String(__c[i].name||'');"
+                "if(__nm.toUpperCase().indexOf('FINAL_EP')===-1)continue;"
+                "__o.push(encodeURIComponent(__nm));}"
+                "__r=__o.join(';');}}"
+                "__r;",
+                decode_json=False)
+            text = str(raw)
+            if text.startswith("!"):
+                return None
+            return [urllib.parse.unquote(p) for p in text.split(";") if p]
+        except Exception:
+            return None
+
+    def _pp_sequence_indices_by_names(self, names):
+        """{name: sequence index} for the given names, in one call.
+
+        Only the episodes actually about to be overwritten need a live
+        Sequence object, so resolving indices is deferred to that point
+        instead of being paid for every nested episode in the project."""
+        from pymiere.core import eval_script as _es
+        import urllib.parse
+        wanted = [n for n in names if n]
+        if not wanted:
+            return {}
+        try:
+            packed = ";".join(urllib.parse.quote(n, safe="-_.!~*'()") for n in wanted)
+            raw = _es(
+                f"var __w='{packed}'.split(';'); var __want={{}};"
+                "for(var i=0;i<__w.length;i++){if(__w[i]!=='')"
+                "__want[decodeURIComponent(__w[i])]=1;}"
+                "var __s=app.project.sequences; var __o=[];"
+                "for(var i=0;i<__s.numSequences;i++){"
+                "var __nm=String(__s[i].name||'');"
+                "if(__want[__nm])__o.push(i+','+encodeURIComponent(__nm));}"
+                "__o.join(';');",
+                decode_json=False)
+            out = {}
+            for rec in str(raw).split(";"):
+                if not rec:
+                    continue
+                idx, _, enc = rec.partition(",")
+                try:
+                    out[urllib.parse.unquote(enc)] = int(idx)
+                except (ValueError, TypeError):
+                    continue
+            return out
+        except Exception:
+            return {}
 
     def _pp_sequence_at(self, idx):
         """Live Sequence object for a project sequence index — the one round
@@ -5187,11 +5321,9 @@ class VFXExporterApp(tk.Tk):
             self.after(0, self._pp_abort_precheck_stop)
             return
         target_ep_nums = set(range(start_ep, start_ep + reel["total"]))
-        # Names only — this check never touches the Sequence objects, and
-        # building them was most of what made "Checking for existing
-        # episodes..." slow.
+        # Names only — this check never touches the Sequence objects.
         existing_ep_nums = {self._pp_extract_ep_num(nm)
-                             for nm, _ in self._pp_scan_project_final_ep_entries()} - {None}
+                             for nm in self._pp_existing_final_ep_names()} - {None}
         colliding = target_ep_nums & existing_ep_nums
 
         def _finish(overwrite_queue):
@@ -5882,12 +6014,19 @@ class VFXExporterApp(tk.Tk):
             # the end) by the time a later episode's overwrite runs. A live
             # Sequence object stays valid across those deletions.
             target_ep_nums = set(range(start_ep, start_ep + total))
+            colliding_names = [nm for nm in self._pp_existing_final_ep_names()
+                               if self._pp_extract_ep_num(nm) in target_ep_nums]
+            # One call to turn just those names into sequence indices, rather
+            # than resolving an object for every nested episode in the project.
+            name_to_idx = self._pp_sequence_indices_by_names(colliding_names)
             existing_final_seqs = {}
-            for nm, idx in self._pp_scan_project_final_ep_entries():
+            for nm in colliding_names:
+                idx = name_to_idx.get(nm)
+                if idx is None:
+                    continue
                 n = self._pp_extract_ep_num(nm)
-                if n is not None and n in target_ep_nums:
-                    existing_final_seqs.setdefault(n, []).append(
-                        (nm, self._pp_sequence_at(idx)))
+                existing_final_seqs.setdefault(n, []).append(
+                    (nm, self._pp_sequence_at(idx)))
 
             # If every remaining episode on this reel already exists in
             # FINAL and the overwrite prompt was declined, nothing here is
