@@ -124,7 +124,7 @@ SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/Finishing Tool")
 #
 # MUST be bumped together with version.json's "version" on every release. A
 # drift between the two is surfaced by APP_MANIFEST_MATCHES and shown in About.
-APP_VERSION_BUILTIN = "1.0.13"
+APP_VERSION_BUILTIN = "1.0.14"
 
 
 def _version_file_candidates():
@@ -3793,20 +3793,59 @@ class VFXExporterApp(tk.Tk):
         num_clips = title_track.clips.numItems
         if num_clips == 0:
             return []
+
+        # Names and start ticks for the whole track in one round trip. This
+        # used to read every clip's name TWICE (once per filter comprehension)
+        # and then its start tick again during the sort — four round trips per
+        # clip, on top of one per clip just to index it.
+        meta = self._pp_batch_clip_meta(seq, track_idx)
+
         all_clips = [title_track.clips[i] for i in range(num_clips)]
+        if meta is None or len(meta) != num_clips:
+            names = [str(c.name or "") for c in all_clips]
+            ticks = [int(c.start.ticks) for c in all_clips]
+        else:
+            names = [m[0] for m in meta]
+            ticks = [m[1] for m in meta]
+
         # Filter to just the title cards when present, matching the same two
         # patterns used to identify this track in the first place: clips
         # named "EPISODE...", or Motion Graphics Template clips (which
         # ExtendScript reports as "Graphic" regardless of the custom text
         # shown on the timeline). Falls back to using every clip only when
         # neither pattern matches anything.
-        episode_named = [c for c in all_clips
-                          if str(c.name or "").upper().startswith("EPISODE")]
-        graphic_named = [c for c in all_clips
-                          if str(c.name or "").strip().upper() == "GRAPHIC"]
-        title_clips = episode_named or graphic_named or all_clips
-        title_clips.sort(key=lambda c: int(c.start.ticks))
-        return title_clips
+        episode_idx = [i for i, n in enumerate(names) if n.upper().startswith("EPISODE")]
+        graphic_idx = [i for i, n in enumerate(names) if n.strip().upper() == "GRAPHIC"]
+        chosen = episode_idx or graphic_idx or list(range(num_clips))
+        chosen.sort(key=lambda i: ticks[i])
+        return [all_clips[i] for i in chosen]
+
+    def _pp_batch_clip_meta(self, seq, track_idx):
+        """[(name, start_ticks), ...] for every clip on one video track, in
+        a single ExtendScript call. Same encodeURIComponent delimiter safety
+        as _pp_batch_track_summary. None if the batched read fails, so the
+        caller can fall back to reading each property."""
+        try:
+            from pymiere.core import eval_script as _es
+            import urllib.parse
+            seq_ref = "$._pymiere['{}']".format(seq._pymiere_id)
+            raw = _es(
+                f"var __tr={seq_ref}.videoTracks[{int(track_idx)}]; var __o=[];"
+                "for(var c=0;c<__tr.clips.numItems;c++){var __cl=__tr.clips[c];"
+                "__o.push(encodeURIComponent(String(__cl.name))+','+String(__cl.start.ticks));}"
+                "__o.join(';');",
+                decode_json=False)
+            out = []
+            for rec in str(raw).split(";"):
+                if not rec:
+                    continue
+                name, _, tick = rec.rpartition(",")
+                out.append((urllib.parse.unquote(name), int(tick)))
+            return out or None
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            return None
 
     def _pp_rescan_current_reel(self, seq, silent=False, track_display=None, manage_thinking=True,
                                  reel_label=None):
@@ -4333,59 +4372,180 @@ class VFXExporterApp(tk.Tk):
                 return i
         return None
 
+    def _pp_batch_track_summary(self, seq):
+        """Every video track's shape in ONE ExtendScript call.
+
+        The scan used to read this a property at a time — videoTracks[t],
+        clips.numItems, then name/start/end on each sampled clip — and every
+        one of those is a separate HTTP round trip to Pymiere Link. At ~17
+        round trips per track, a few reels of a 20-track stringout was three
+        minutes of pure latency. This is the same batching already used by
+        _pp_create_subsequence_batched and _pp_format_timecodes, applied to
+        the scan: one round trip per sequence regardless of track count.
+
+        Names are encodeURIComponent'd in ExtendScript before joining, so a
+        clip called "EP01, take 2" can't break the delimiters — that function
+        escapes , ; and % and leaves alphanumerics alone.
+
+        Returns [{idx, n_clips, first: [(name, dur_seconds), ...],
+                  last_name, last_ticks}], or None if the batched read fails,
+        so callers can fall back to the per-property path."""
+        try:
+            from pymiere.core import eval_script as _es
+            import urllib.parse
+            seq_ref = "$._pymiere['{}']".format(seq._pymiere_id)
+            raw = _es(
+                f"var __s={seq_ref}; var __o=[];"
+                "for(var t=0;t<__s.videoTracks.numTracks;t++){"
+                "var __tr=__s.videoTracks[t]; var __n=__tr.clips.numItems;"
+                "if(__n>0){"
+                "var __f=[]; var __lim=Math.min(3,__n);"
+                "for(var c=0;c<__lim;c++){var __cl=__tr.clips[c];"
+                "__f.push(encodeURIComponent(String(__cl.name))+','+"
+                "String(__cl.end.seconds-__cl.start.seconds));}"
+                "var __lc=__tr.clips[__n-1];"
+                "__o.push(t+','+__n+','+encodeURIComponent(String(__lc.name))+','+"
+                "String(__lc.start.ticks)+','+__f.join(','));"
+                "}else{__o.push(t+','+__n+',,0');}}"
+                "__o.join(';');",
+                decode_json=False)
+            tracks = []
+            for rec in str(raw).split(";"):
+                if not rec:
+                    continue
+                parts = rec.split(",")
+                if len(parts) < 4:
+                    continue
+                first = []
+                rest = parts[4:]
+                for i in range(0, len(rest) - 1, 2):
+                    try:
+                        first.append((urllib.parse.unquote(rest[i]), float(rest[i + 1])))
+                    except (ValueError, TypeError):
+                        continue
+                tracks.append({
+                    "idx": int(parts[0]),
+                    "n_clips": int(parts[1]),
+                    "last_name": urllib.parse.unquote(parts[2]),
+                    "last_ticks": parts[3],
+                    "first": first,
+                })
+            return tracks or None
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _pp_pick_tails(self, tracks, title_idx, show_code=""):
+        """Tail leader start ticks, checking as few clips as possible.
+
+        Only the LAST clip of a track can be the tail leader, and only a
+        narrow band of tracks can hold it: V1, plus the tracks above the
+        Video Reference track but below the title cards. The old scan checked
+        the last clip of every track above V4 — including tracks above the
+        title cards, where it never lives — and took the first "tail" match
+        found scanning upward.
+
+        The reference track is identified by its FIRST clip alone: the ref is
+        the only clip on its track, so there is nothing else there to find.
+
+        Falls back to every track below the title cards when no ref track is
+        identified, which is still far narrower than the old rule and can't
+        miss anything the new rule would have found."""
+        by_idx = {t["idx"]: t for t in tracks}
+        sc = (show_code or "").strip().lower()
+        ceiling = title_idx if title_idx is not None else max(by_idx or {0: None}) + 1
+
+        ref_idx = None
+        for t in sorted(by_idx):
+            if t >= ceiling:
+                break
+            first = by_idx[t]["first"]
+            if not first:
+                continue
+            name = first[0][0]
+            low = name.lower()
+            has_ref = any(p.startswith("ref") for p in low.split("_"))
+            has_piclock = "picloc" in low.replace(" ", "")
+            if (not sc or sc in low) and (has_ref or has_piclock):
+                ref_idx = t
+                break
+
+        candidates = [0] + list(range((ref_idx + 1) if ref_idx is not None else 1, ceiling))
+        seen = set()
+        for t in candidates:
+            if t in seen or t not in by_idx:
+                continue
+            seen.add(t)
+            rec = by_idx[t]
+            if rec["n_clips"] == 0:
+                continue
+            if "tail" in rec["last_name"].lower():
+                try:
+                    return int(rec["last_ticks"]), ref_idx
+                except (ValueError, TypeError):
+                    continue
+        return None, ref_idx
+
     def _pp_scan_tracks(self, seq, silent=False, manage_thinking=True, reel_label=None):
         """Scan tracks — only samples first 3 clips per track for speed."""
         try:
             import pymiere
-            num_tracks = seq.videoTracks.numTracks
             candidate_tracks = []
             tails_tc = None
             found_episode_track = None
 
-            # Pass 1: Find episode track (sample 3 clips per track above V8)
-            # Also do a quick tails scan on the last clip of each track above V4
-            for t in range(num_tracks):
+            # One round trip for every track's shape (see
+            # _pp_batch_track_summary). Falls back to reading each property
+            # individually if that fails, since it reaches into ExtendScript
+            # more directly than a normal pymiere call — same
+            # batch-with-fallback approach as _pp_create_subsequence_batched.
+            summary = self._pp_batch_track_summary(seq)
+            if summary is None:
+                summary = []
+                for t in range(seq.videoTracks.numTracks):
+                    track = seq.videoTracks[t]
+                    n_clips = track.clips.numItems
+                    rec = {"idx": t, "n_clips": n_clips, "first": [],
+                           "last_name": "", "last_ticks": "0"}
+                    if n_clips:
+                        for c in range(min(3, n_clips)):
+                            clip = track.clips[c]
+                            rec["first"].append((
+                                str(clip.name) if clip.name is not None else "",
+                                clip.end.seconds - clip.start.seconds))
+                        last_clip = track.clips[n_clips - 1]
+                        rec["last_name"] = (str(last_clip.name)
+                                            if last_clip.name is not None else "")
+                        rec["last_ticks"] = str(int(last_clip.start.ticks))
+                    summary.append(rec)
+
+            # Tails is deliberately NOT computed here any more — it needs the
+            # title-card track to know which band of tracks to look at, so it
+            # happens once, below, after that's been picked.
+            for rec in summary:
                 if self._pp_skip_nest_mode or not self._pp_connected or self._pp_prescan_abort or self._pp_scan_cancel:
                     # Skip Nest was clicked, RESET ALL ran, Reset Nest
                     # interrupted a still-running prescan (without
                     # disconnecting — see _pp_prescan_abort), or STOP
                     # cancelled just this one scan (see _pp_scan_cancel),
-                    # mid-scan —
-                    # the batch loop in _pp_prescan_all_reels_task only
-                    # checks this between reels, so without this a reel
-                    # with a lot of tracks could keep making real
-                    # ExtendScript calls for several more seconds after the
-                    # dropdown already reads "SKIPPED", making the STOP
-                    # button/thinking dots look stuck. This reel's result
-                    # would just get discarded anyway (see the same check
-                    # in _pp_rescan_current_reel's _apply()), so bail now
-                    # instead of finishing the scan first.
+                    # mid-scan. The per-track reads this used to guard are now
+                    # a single batched call that has already returned by this
+                    # point, so this no longer saves ExtendScript work — but
+                    # this reel's result would be discarded anyway (see the
+                    # same check in _pp_rescan_current_reel's _apply()), so
+                    # bail rather than finish classifying and hand back a
+                    # result nobody wants.
                     if manage_thinking:
                         self.after(0, self._stop_thinking)
                     return
-                track = seq.videoTracks[t]
-                n_clips = track.clips.numItems
+                t = rec["idx"]
+                n_clips = rec["n_clips"]
                 if n_clips == 0:
                     continue
 
-                # Check last clip for tails on all tracks above V4
-                if t >= 4 and tails_tc is None:
-                    last_clip = track.clips[n_clips - 1]
-                    last_name = str(last_clip.name) if last_clip.name is not None else ""
-                    if "tail" in last_name.lower():
-                        tails_tc = int(last_clip.start.ticks)
-
-                # Sample first 3 clips to identify episode title card track
-                sample = min(3, n_clips)
-                sample_names = []
-                sample_durs = []
-                for c in range(sample):
-                    clip = track.clips[c]
-                    name = str(clip.name) if clip.name is not None else ""
-                    dur = clip.end.seconds - clip.start.seconds
-                    sample_names.append(name)
-                    sample_durs.append(dur)
-
+                sample_names = [n for n, _ in rec["first"]]
+                sample_durs = [d for _, d in rec["first"]]
                 avg_dur = sum(sample_durs) / len(sample_durs) if sample_durs else 0
                 label = f"V{t+1} — {n_clips} clips · avg {avg_dur:.1f}s"
                 # Two patterns for a title-card track, both requiring EVERY
@@ -4465,7 +4625,13 @@ class VFXExporterApp(tk.Tk):
             display["manual_options"] = sorted(
                 t_idx for t_idx, _, _, n_clips, _ in candidate_tracks if n_clips <= 30)
 
-            # Tails
+            # Tails — resolved now that the title-card track is known, so the
+            # search can be limited to V1 plus the band between the reference
+            # track and the title cards, last clip only. Reads nothing extra:
+            # every name and tick it needs already came back in the batch.
+            tails_tc, _ref_idx = self._pp_pick_tails(
+                summary, self._pp_track_idx, self.pp_show_code.get())
+
             if tails_tc is not None:
                 self._pp_tails_tc = tails_tc
                 try:
