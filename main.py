@@ -124,7 +124,7 @@ SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/Finishing Tool")
 #
 # MUST be bumped together with version.json's "version" on every release. A
 # drift between the two is surfaced by APP_MANIFEST_MATCHES and shown in About.
-APP_VERSION_BUILTIN = "1.0.17"
+APP_VERSION_BUILTIN = "1.0.18"
 
 
 def _version_file_candidates():
@@ -2077,7 +2077,11 @@ class VFXExporterApp(tk.Tk):
             hovered = self.winfo_containing(event.x_root, event.y_root)
             if isinstance(hovered, tk.Text):
                 return
-            first, last = self._test_scrollbar.get()
+            # yview(), not the scrollbar's get(): _make_scrollbar returns a
+            # custom-drawn Canvas (it only implements .set, to receive
+            # yscrollcommand), so calling .get() on it raised on every wheel
+            # event and the scroll never happened.
+            first, last = self._test_canvas.yview()
             if first <= 0.0 and last >= 1.0:
                 return  # nothing to scroll — let the event fall through
             self._test_canvas.yview_scroll(int(-1 * event.delta), "units")
@@ -7142,6 +7146,7 @@ class VFXExporterApp(tk.Tk):
         # tabs — but pinning the group at press time keeps the release
         # rebuilding the grid the gesture actually started in.
         self._pp_chip_drag_group = getattr(event.widget, "_ep_group", None)
+        self._pp_chip_drag_last_pos = (event.x_root, event.y_root)
         if target_disabled:
             disabled_set.add(name)
         else:
@@ -7156,24 +7161,50 @@ class VFXExporterApp(tk.Tk):
         target = getattr(self, "_pp_chip_drag_state", None)
         if target is None:
             return
-        widget = self.winfo_containing(event.x_root, event.y_root)
-        if widget is None:
-            return
-        if getattr(widget, "_ep_group", None) != getattr(self, "_pp_chip_drag_group", None):
-            return
-        name = self._pp_chip_toggleable(widget)
-        if name is None or name in self._pp_chip_drag_touched:
-            return
-        group = self._chip_group(widget)
-        if group is None:
-            return
-        disabled_set, paint, _rebuild = group
-        self._pp_chip_drag_touched.add(name)
-        if target:
-            disabled_set.add(name)
-        else:
-            disabled_set.discard(name)
-        paint(widget, target)
+        # Sample along the path from the previous position, not just the
+        # current point. Tk delivers motion events at whatever rate it
+        # manages, so a quick sweep can jump several chips between two
+        # events — measured: one event spanning six chips only ever touched
+        # the two it landed on. Stepping in chip-sized increments catches
+        # everything crossed. A slow drag moves a few pixels per event, so
+        # this normally yields a single point and costs nothing extra.
+        last = getattr(self, "_pp_chip_drag_last_pos", None)
+        cur = (event.x_root, event.y_root)
+        self._pp_chip_drag_last_pos = cur
+        for px, py in self._points_between(last, cur):
+            widget = self.winfo_containing(px, py)
+            if widget is None:
+                continue
+            if getattr(widget, "_ep_group", None) != getattr(self, "_pp_chip_drag_group", None):
+                continue
+            name = self._pp_chip_toggleable(widget)
+            if name is None or name in self._pp_chip_drag_touched:
+                continue
+            group = self._chip_group(widget)
+            if group is None:
+                continue
+            disabled_set, paint, _rebuild = group
+            self._pp_chip_drag_touched.add(name)
+            if target:
+                disabled_set.add(name)
+            else:
+                disabled_set.discard(name)
+            paint(widget, target)
+
+    @staticmethod
+    def _points_between(start, end, step=12):
+        """Points along start->end at roughly `step` pixels apart, always
+        including the endpoint. step is smaller than a chip in both
+        dimensions (chips are ~74x26, rows ~30 apart) so nothing crossed can
+        fall between two samples. Capped so a wild pointer jump can't turn
+        one motion event into thousands of winfo_containing calls."""
+        if start is None:
+            return [end]
+        (x0, y0), (x1, y1) = start, end
+        span = max(abs(x1 - x0), abs(y1 - y0))
+        n = max(1, min(int(span // step), 300))
+        return [(int(x0 + (x1 - x0) * i / n), int(y0 + (y1 - y0) * i / n))
+                for i in range(1, n + 1)]
 
     def _pp_chip_drag_end(self, event):
         """One real rebuild at the end, which refreshes the DISABLE ALL /

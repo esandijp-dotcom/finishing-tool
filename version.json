@@ -1,6 +1,6 @@
 {
-  "version": "1.0.17",
-  "release_notes": "## Drag to add or remove episodes on the VFX tab too\n- The DETECTED EPISODES tags now click-and-drag exactly like the EXPORT QUEUE chips added in 1.0.16: whichever way the first tag flips is applied to every tag you drag across, so dragging over a mix sets them all the same way instead of inverting each one\n- A plain click still toggles a single tag, and tags stay locked while an export is running",
+  "version": "1.0.18",
+  "release_notes": "## Fixes\n- The mouse wheel actually scrolls the Episode Export tab now. The fix in 1.0.16 was itself broken — it asked the scrollbar how far it was scrolled, but that scrollbar is custom-drawn and has no such method, so every wheel event failed silently and nothing moved\n- Dragging quickly across episode chips no longer skips the ones in between. The drag only ever checked where the pointer had landed, so a fast sweep across six chips would toggle two of them. It now follows the path taken between updates\n\n## Also in this build\n- Drag to add or remove works on the VFX tab's DETECTED EPISODES tags as well as the EXPORT QUEUE chips (added in 1.0.17)",
   "download_url": "https://raw.githubusercontent.com/esandijp-dotcom/finishing-tool/main/main.py",
   "assets": [
     "bug_icon.png",
