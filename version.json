@@ -1,6 +1,6 @@
 {
-  "version": "1.0.22",
-  "release_notes": "## Queueing to Media Encoder is much faster\n- The pause you saw after each episode appeared in Media Encoder was the app preparing the NEXT one. Before handing an episode over it resets every track's mute state, and it was doing that one track at a time — roughly two dozen separate requests to Premiere per episode, per version. That is now a single request\n- MARKETING and the Social Media watermark had the same problem finding the Music, lower-third and Watermark tracks: every clip on every track was read individually. Each is now read in one pass\n- For a plain LIVE export that takes an episode from about two dozen requests down to one",
+  "version": "1.0.23",
+  "release_notes": "## Scanning for nested episodes on the export tab is much faster\n- Finding the trailer was checking every single sequence in the project one at a time — hundreds of separate requests to Premiere. It is now one\n- The scan was also building a live reference to every nested episode in the project and then throwing away the ones already in the queue. It now filters by name first and only builds references for episodes it is actually adding\n\n## Phase 2 buttons and menu\n- Connect to AME now greys out once you are connected, instead of staying lit after connecting, queueing or clearing. A new Disconnect in the ••• menu is the way back\n- New Reset Queue in the ••• menu: clears what was queued so Queue Episodes runs again, while KEEPING which episodes you had selected\n- Clear Queue still resets the selection too, putting every episode back to included",
   "download_url": "https://raw.githubusercontent.com/esandijp-dotcom/finishing-tool/main/main.py",
   "assets": [
     "bug_icon.png",

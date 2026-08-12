@@ -124,7 +124,7 @@ SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/Finishing Tool")
 #
 # MUST be bumped together with version.json's "version" on every release. A
 # drift between the two is surfaced by APP_MANIFEST_MATCHES and shown in About.
-APP_VERSION_BUILTIN = "1.0.22"
+APP_VERSION_BUILTIN = "1.0.23"
 
 
 def _version_file_candidates():
@@ -5027,18 +5027,29 @@ class VFXExporterApp(tk.Tk):
         """First sequence in the current Premiere project with both FINAL
         and TRAILER in its name — the pre-existing, already-nested trailer
         timeline Skip Nest picks up for the export queue. Returns (name,
-        seq) or None."""
-        import pymiere
+        seq) or None.
+
+        The match runs inside ONE ExtendScript call. This used to walk every
+        sequence in the project from Python — seqs[i] and then .name, two
+        round trips each — and a season's project holds hundreds, so on the
+        export tab's scan it was the single slowest thing happening. Only the
+        one match (if any) costs a round trip to turn into a real object."""
+        from pymiere.core import eval_script as _es
+        import urllib.parse
         try:
-            seqs = pymiere.objects.app.project.sequences
-            n = len(seqs)
-            for i in range(n):
-                s = seqs[i]
-                nm = str(s.name) if s.name is not None else ""
-                upper = nm.upper()
-                if "FINAL" in upper and "TRAILER" in upper:
-                    return (nm, s)
-            return None
+            raw = _es(
+                "var __s=app.project.sequences; var __r='';"
+                "for(var i=0;i<__s.numSequences;i++){"
+                "var __nm=String(__s[i].name||''); var __u=__nm.toUpperCase();"
+                "if(__u.indexOf('FINAL')!==-1&&__u.indexOf('TRAILER')!==-1){"
+                "__r=i+','+encodeURIComponent(__nm); break;}}"
+                "__r;",
+                decode_json=False)
+            text = str(raw)
+            if not text:
+                return None
+            idx, _, enc = text.partition(",")
+            return (urllib.parse.unquote(enc), self._pp_sequence_at(int(idx)))
         except Exception:
             return None
 
@@ -5864,11 +5875,20 @@ class VFXExporterApp(tk.Tk):
     def _pp_exp_menu(self):
         """PHASE 2's ••• menu — mirrors PHASE 1's."""
         actions = getattr(self, "_pp_exp_actions", {})
+        connected = getattr(self, "_pp_ame_connected", False)
         menu = tk.Menu(self, tearoff=0)
+        # Reset Queue keeps the selection, Clear Queue resets it as well —
+        # the distinction Phase 1's Reset Reel / Reset All draws, applied to
+        # the queue.
+        menu.add_command(label="Reset Queue", command=self._pp_reset_queue,
+                         state="normal" if actions.get("clear") else "disabled")
         menu.add_command(label="Clear Queue", command=self._pp_reset_export,
                          state="normal" if actions.get("clear") else "disabled")
         menu.add_command(label="Rescan Episodes", command=self._pp_connect_ame,
                          state="normal" if actions.get("rescan") else "disabled")
+        menu.add_separator()
+        menu.add_command(label="Disconnect", command=self._pp_disconnect_ame,
+                         state="normal" if connected else "disabled")
         self._pp_popup_under(menu, self.btn_pp_exp_menu)
 
     def _pp_disconnect_click(self):
@@ -6464,7 +6484,7 @@ class VFXExporterApp(tk.Tk):
         self._pp_refresh_export_button()
         if not self._pp_ame_connected:
             self._pp_set_circle_active(self._pp_circ_p2_1, "1")
-            self._set_btn_state(self.btn_pp_connect_ame, True)
+            self._pp_refresh_connect_ame_enabled()
 
     def _pp_skip_nest_click(self):
         """Bypass Phase 1 entirely — abandons any in-progress nest (every
@@ -6522,7 +6542,7 @@ class VFXExporterApp(tk.Tk):
         for box in self._pp_track_auto_boxes.values():
             box["dropdown"].set_locked(True)
         self._pp_set_circle_active(self._pp_circ_p2_1, "1")
-        self._set_btn_state(self.btn_pp_connect_ame, True)
+        self._pp_refresh_connect_ame_enabled()
         self._pp_exp_status.config(
             text="Click Connect to AME to scan the project for nested episodes.", fg=TEXT_MUTED)
         self.btn_pp_skip_nest._text = "Back to nesting"
@@ -6635,7 +6655,7 @@ class VFXExporterApp(tk.Tk):
             try:
                 subprocess.Popen(["open", "-a", "Adobe Media Encoder"])
             except Exception as e:
-                self._set_btn_state(self.btn_pp_connect_ame, True)
+                self._pp_refresh_connect_ame_enabled()
                 self._pp_exp_status.config(text=f"✗ Could not launch AME: {e}", fg=TEXT_ERROR)
                 return
             self._pp_ame_connected = True
@@ -6658,7 +6678,7 @@ class VFXExporterApp(tk.Tk):
             # tells _pp_skip_nest_scan_task's _apply() to discard its
             # result once it eventually does.
             self._pp_ame_scan_cancel = True
-            self._set_btn_state(self.btn_pp_connect_ame, True)
+            self._pp_refresh_connect_ame_enabled()
             self._pp_exp_status.config(text="Stopped.", fg=TEXT_WARN)
 
         self._start_thinking(on_stop=_on_stop)
@@ -6685,14 +6705,23 @@ class VFXExporterApp(tk.Tk):
             # day would never string-match an entry already in the queue.
             existing_names = {name for name, _, _ in self._pp_created_seqs}
             existing_ep_nums = {self._pp_extract_ep_num(n) for n in existing_names} - {None}
-            found = []
-            for nm, s in self._pp_scan_project_final_ep_seqs():
+
+            # Filter by NAME first, then build Sequence objects only for what
+            # survives. This used to materialise an object for every nested
+            # episode in the project — a round trip each — and then discard
+            # the ones already in the queue, so a rescan paid for 90 objects
+            # to add none of them.
+            wanted_names = []
+            for nm in self._pp_existing_final_ep_names():
                 ep_num = self._pp_extract_ep_num(nm)
                 if ep_num is not None:
                     if ep_num not in existing_ep_nums:
-                        found.append((nm, s))
+                        wanted_names.append(nm)
                 elif nm not in existing_names:
-                    found.append((nm, s))
+                    wanted_names.append(nm)
+            name_to_idx = self._pp_sequence_indices_by_names(wanted_names)
+            found = [(nm, self._pp_sequence_at(name_to_idx[nm]))
+                     for nm in wanted_names if nm in name_to_idx]
 
             found.sort(key=lambda pair: (self._pp_extract_ep_num(pair[0]) if self._pp_extract_ep_num(pair[0]) is not None else float("inf")))
 
@@ -6724,7 +6753,7 @@ class VFXExporterApp(tk.Tk):
                     self._pp_refresh_social_media_enabled()
                     self._pp_refresh_manual_folder_rows()
                 self._pp_set_exp_action_enabled("rescan", True)
-                self._set_btn_state(self.btn_pp_connect_ame, True)
+                self._pp_refresh_connect_ame_enabled()
                 # A rescan is the deliberate action that unlocks the
                 # utility buttons again after a completed run — see
                 # _pp_exp_util_locked.
@@ -6753,7 +6782,7 @@ class VFXExporterApp(tk.Tk):
             traceback.print_exc()
             self.after(0, self._stop_thinking)
             _status(f"✗ Scan failed: {e}", TEXT_ERROR)
-            self._set_btn_state(self.btn_pp_connect_ame, True)
+            self._pp_refresh_connect_ame_enabled()
 
     def _pp_refresh_social_media_enabled(self):
         """SOCIAL MEDIA only ever applies to the TRAILER entry (never
@@ -8073,6 +8102,56 @@ class VFXExporterApp(tk.Tk):
                 self._pp_set_exp_action_enabled("clear", True)
             self.after(0, _restore_after_export)
 
+    def _pp_refresh_connect_ame_enabled(self):
+        """Connect to AME is clickable only while NOT connected.
+
+        It used to re-enable itself after every scan, every queue run and
+        every clear, so a button labelled "Connect to AME" sat lit long after
+        connecting and reconnecting did nothing useful. Disconnect in the •••
+        menu is now the only way back."""
+        self._set_btn_state(self.btn_pp_connect_ame,
+                            not getattr(self, "_pp_ame_connected", False))
+
+    def _pp_disconnect_ame(self):
+        """Drops the AME connection and re-arms Connect to AME. Leaves the
+        queue and the episode selection alone — this is about the connection,
+        not the work."""
+        proceed = self._pp_alert_dialog(
+            "Disconnect from Media Encoder?",
+            "Connect to AME becomes available again. Your queued episodes and "
+            "selection stay as they are.",
+            tip="Media Encoder itself isn't closed, and anything already sent "
+                "to it stays in its queue.")
+        if not proceed:
+            return
+        self._pp_ame_connected = False
+        self._pp_refresh_connect_ame_enabled()
+        self._pp_set_exp_action_enabled("rescan", False)
+        self._pp_set_circle_active(self._pp_circ_p2_1, "1")
+        self._pp_exp_status.config(text="Disconnected from Media Encoder.", fg=TEXT_MUTED)
+
+    def _pp_reset_queue(self):
+        """Reset Queue — forgets what was queued so Queue Episodes can run
+        again, while KEEPING which episodes are selected.
+
+        Clear Queue resets the selection too (everything back to included);
+        this is the one to use after a queue run when the point is to send the
+        same selection again, or a corrected version of it."""
+        self._pp_stop_export = False
+        self._pp_exp_resume_idx = 0
+        self._pp_exp_started = False
+        self._pp_exp_run_complete = False
+        self._pp_exp_queued = set()
+        self._pp_exp_done_style = {}
+        self._pp_set_circle_active(self._pp_circ_p2_2, "2")
+        self.btn_pp_export._text = "Queue Episodes"
+        self.btn_pp_export._command = self._pp_run_export
+        self._pp_exp_progress_var.set(0)
+        self._pp_reset_exp_progress_color()
+        self._pp_exp_status.config(text="Queue reset — selection kept.", fg=TEXT_MUTED)
+        self._pp_build_exp_chips()
+        self._pp_refresh_export_button()
+
     def _pp_reset_export(self):
         """Resets the export run's progress and clears the export queue's
         permanent queued/disabled tracking — every chip goes back to its
@@ -8087,6 +8166,9 @@ class VFXExporterApp(tk.Tk):
         self._pp_exp_disabled = set()
         self._pp_exp_done_style = {}
         self._pp_exp_all_disabled = False
+        # _pp_exp_disabled cleared above, so Clear also puts every episode
+        # back to selected — the "start again from everything" action, as
+        # against Reset Queue which preserves what you had picked.
         self.btn_toggle_exp_all.config(text="DISABLE ALL", bg=BG_INPUT, fg=TEXT_PRIMARY)
         self._pp_set_circle_active(self._pp_circ_p2_2, "2")
         self.btn_pp_export._text = "Queue Episodes"
