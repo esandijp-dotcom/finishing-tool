@@ -124,7 +124,7 @@ SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/Finishing Tool")
 #
 # MUST be bumped together with version.json's "version" on every release. A
 # drift between the two is surfaced by APP_MANIFEST_MATCHES and shown in About.
-APP_VERSION_BUILTIN = "1.0.12"
+APP_VERSION_BUILTIN = "1.0.13"
 
 
 def _version_file_candidates():
@@ -2320,15 +2320,9 @@ class VFXExporterApp(tk.Tk):
         # this workflow continues anyway.
         p1_actions = tk.Frame(p1_row, bg=BG_DARK)
         p1_actions.pack(side="right")
-        self.btn_pp_reset_nest = self._rounded_btn(p1_actions, "Reset status",
-                                                    self._pp_reset_status_click, enabled=False)
-        self.btn_pp_reset_nest.pack(side="left", padx=(0, 8))
-        self.btn_pp_clear_nest = self._rounded_btn(p1_actions, "Clear",
-                                                    self._pp_clear_nest_click, enabled=False)
-        self.btn_pp_clear_nest.pack(side="left", padx=(0, 8))
-        self.btn_pp_rescan_nest = self._rounded_btn(p1_actions, "Rescan",
-                                                     self._pp_rescan_nest_click, enabled=False)
-        self.btn_pp_rescan_nest.pack(side="left", padx=(0, 8))
+        self.btn_pp_nest_menu = self._rounded_btn(p1_actions, "•••",
+                                                   self._pp_nest_menu, enabled=False)
+        self.btn_pp_nest_menu.pack(side="left", padx=(0, 8))
 
         # Bypass Phase 1 entirely when episodes were already nested in a
         # previous session; unlocks Connect to AME, which then scans the
@@ -2336,7 +2330,7 @@ class VFXExporterApp(tk.Tk):
         # AME. Only usable once connected to Premiere. Named for where it
         # takes you — it lived at the far right of PHASE 1 while actually
         # jumping to PHASE 2.
-        self.btn_pp_skip_nest = self._rounded_btn(p1_actions, "Skip to export",
+        self.btn_pp_skip_nest = self._rounded_btn(p1_actions, "Skip to Export",
                                                    self._pp_skip_nest_click, enabled=False)
         self.btn_pp_skip_nest.pack(side="left")
 
@@ -2459,12 +2453,14 @@ class VFXExporterApp(tk.Tk):
         # Secondary actions, mirroring PHASE 1's group exactly.
         p2_actions = tk.Frame(p2_row, bg=BG_DARK)
         p2_actions.pack(side="right")
-        self.btn_pp_reset_exp = self._rounded_btn(p2_actions, "Clear queue",
-                                                   self._pp_reset_export, enabled=False)
-        self.btn_pp_reset_exp.pack(side="left", padx=(0, 8))
-        self.btn_pp_rescan_eps = self._rounded_btn(p2_actions, "Rescan episodes",
-                                                    self._pp_connect_ame, enabled=False)
-        self.btn_pp_rescan_eps.pack(side="left")
+        # Per-item availability differs (Clear Queue and Rescan Episodes
+        # unlock at different points), so the menu button is enabled whenever
+        # EITHER applies and the individual entries grey out independently —
+        # see _pp_set_exp_action_enabled.
+        self._pp_exp_actions = {"clear": False, "rescan": False}
+        self.btn_pp_exp_menu = self._rounded_btn(p2_actions, "•••",
+                                                  self._pp_exp_menu, enabled=False)
+        self.btn_pp_exp_menu.pack(side="left")
 
         self._pp_exp_progress_var = tk.DoubleVar(value=0)
         self._pp_exp_progress = ttk.Progressbar(main,
@@ -5213,7 +5209,7 @@ class VFXExporterApp(tk.Tk):
         self._set_btn_state(self.btn_pp_stop_nest, False)
         self._pp_set_nest_actions_enabled(False)
         self._pp_skip_nest_mode = False
-        self.btn_pp_skip_nest._text = "Skip to export"
+        self.btn_pp_skip_nest._text = "Skip to Export"
         self.btn_pp_skip_nest._command = self._pp_skip_nest_click
         self._set_btn_state(self.btn_pp_skip_nest, keep_premiere_connection)
         self._pp_nest_progress_var.set(0)
@@ -5241,12 +5237,12 @@ class VFXExporterApp(tk.Tk):
         self.btn_pp_connect_ame._command = self._pp_connect_ame
         self._set_btn_state(self.btn_pp_connect_ame, False)
         # Rescanning is only meaningful once a scan has happened at all.
-        self._set_btn_state(self.btn_pp_rescan_eps, False)
+        self._pp_set_exp_action_enabled("rescan", False)
         self.btn_pp_export._text = "Queue Episodes"
         self.btn_pp_export._command = self._pp_run_export
         self._set_btn_state(self.btn_pp_export, False)
         self._set_btn_state(self.btn_pp_stop_exp, False)
-        self._set_btn_state(self.btn_pp_reset_exp, False)
+        self._pp_set_exp_action_enabled("clear", False)
         self._pp_exp_progress_var.set(0)
         self._pp_reset_exp_progress_color()
         self._pp_exp_status.config(text="", fg=TEXT_MUTED)
@@ -5338,17 +5334,31 @@ class VFXExporterApp(tk.Tk):
         self._pp_refresh_export_button()
 
     def _pp_set_nest_actions_enabled(self, enabled):
-        """Reset status / Clear / Rescan share one enabled state — they're
-        the same class of action on the same data, and previously there was
-        only one button (Reset Nest) for every call site to toggle.
+        """Enables the ••• menu holding Reset Reel / Reset All / Rescan /
+        Disconnect. These were briefly three separate buttons, which made the
+        action row wide and forced each label to carry its own scope —
+        "Reset status" vs "Clear" described a difference in KIND that didn't
+        exist (both put episodes back to pending; only the number of reels
+        differed). A menu states the scope per entry instead, and names the
+        reel outright, so nothing has to be inferred.
 
-        getattr-guarded because some of these call sites run during the
-        initial reset that happens while the tab is still being built, before
-        the later buttons in the group exist."""
-        for name in ("btn_pp_reset_nest", "btn_pp_clear_nest", "btn_pp_rescan_nest"):
-            btn = getattr(self, name, None)
-            if btn is not None:
-                self._set_btn_state(btn, enabled)
+        getattr-guarded because some call sites run during the initial reset
+        that happens while the tab is still being built."""
+        btn = getattr(self, "btn_pp_nest_menu", None)
+        if btn is not None:
+            self._set_btn_state(btn, enabled)
+
+    def _pp_set_exp_action_enabled(self, key, enabled):
+        """PHASE 2's ••• entries unlock independently — Clear Queue once a
+        queue run has produced something, Rescan Episodes once AME has been
+        connected. The button itself is live whenever either is."""
+        actions = getattr(self, "_pp_exp_actions", None)
+        if actions is None:
+            return
+        actions[key] = enabled
+        btn = getattr(self, "btn_pp_exp_menu", None)
+        if btn is not None:
+            self._set_btn_state(btn, any(actions.values()))
 
     def _pp_reel_index(self, reel):
         """Position of a reel in self._pp_reels, by identity — list.index()
@@ -5435,6 +5445,69 @@ class VFXExporterApp(tk.Tk):
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
+
+    def _pp_popup_under(self, menu, btn):
+        """Drops a menu from a button's bottom-left corner. _rounded_btn's
+        command takes no event, so there are no pointer coordinates to
+        position from — anchor to the widget instead."""
+        try:
+            menu.tk_popup(btn.winfo_rootx(), btn.winfo_rooty() + btn.winfo_height())
+        finally:
+            menu.grab_release()
+
+    def _pp_armed_reel_label(self):
+        """"Reel 2" for the currently armed reel, or None if none is armed.
+
+        The menu names the reel outright rather than saying "this reel",
+        because which one that is isn't otherwise visible at the moment of
+        clicking — especially with Nest All on, where the dropdown is locked
+        and the armed reel moves on its own as the run advances."""
+        if self._pp_current_reel is None or self._pp_current_reel >= len(self._pp_reels):
+            return None
+        raw = (self._pp_reels[self._pp_current_reel].get("reel_label") or "").strip()
+        return raw.title() if raw else None
+
+    def _pp_nest_menu(self):
+        """PHASE 1's ••• menu."""
+        menu = tk.Menu(self, tearoff=0)
+        label = self._pp_armed_reel_label()
+        has_reels = bool(self._pp_reels)
+        menu.add_command(label=f"Reset {label}" if label else "Reset Reel",
+                         command=self._pp_reset_status_click,
+                         state="normal" if label else "disabled")
+        menu.add_command(label="Reset All", command=self._pp_clear_nest_click,
+                         state="normal" if has_reels else "disabled")
+        menu.add_command(label="Rescan", command=self._pp_rescan_nest_click,
+                         state="normal" if has_reels else "disabled")
+        menu.add_separator()
+        menu.add_command(label="Disconnect", command=self._pp_disconnect_click,
+                         state="normal" if self._pp_connected else "disabled")
+        self._pp_popup_under(menu, self.btn_pp_nest_menu)
+
+    def _pp_exp_menu(self):
+        """PHASE 2's ••• menu — mirrors PHASE 1's."""
+        actions = getattr(self, "_pp_exp_actions", {})
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Clear Queue", command=self._pp_reset_export,
+                         state="normal" if actions.get("clear") else "disabled")
+        menu.add_command(label="Rescan Episodes", command=self._pp_connect_ame,
+                         state="normal" if actions.get("rescan") else "disabled")
+        self._pp_popup_under(menu, self.btn_pp_exp_menu)
+
+    def _pp_disconnect_click(self):
+        """Drops the Premiere connection and puts PHASE 1 back to its opening
+        state. Confirms first — it discards the scan, every reel's progress,
+        and the export queue, which is more than either reset does."""
+        proceed = self._pp_alert_dialog(
+            "Disconnect from Premiere?",
+            "This clears the timeline scan, every reel's nesting progress, and "
+            "the export queue, and returns to step 1.",
+            tip="Sequences already created in Premiere are not deleted — this "
+                "only forgets them here.")
+        if not proceed:
+            return
+        self._pp_full_reset()
+        self._pp_nest_status.config(text="Disconnected.", fg=TEXT_MUTED)
 
     def _pp_reset_status_click(self):
         """Reset status — puts the CURRENT reel's episodes back to pending
@@ -6140,7 +6213,7 @@ class VFXExporterApp(tk.Tk):
             # Step 1 keeps saying "Connect to AME" — rescanning is its own
             # control now, unlocked here rather than by this button becoming
             # a different button.
-            self._set_btn_state(self.btn_pp_rescan_eps, True)
+            self._pp_set_exp_action_enabled("rescan", True)
         self._pp_exp_status.config(text="Scanning project for nested episodes...", fg=TEXT_MUTED)
         self._pp_ame_scan_cancel = False
 
@@ -6219,7 +6292,7 @@ class VFXExporterApp(tk.Tk):
                     self._pp_trailer_seq_name = nm
                     self._pp_refresh_social_media_enabled()
                     self._pp_refresh_manual_folder_rows()
-                self._set_btn_state(self.btn_pp_rescan_eps, True)
+                self._pp_set_exp_action_enabled("rescan", True)
                 self._set_btn_state(self.btn_pp_connect_ame, True)
                 # A rescan is the deliberate action that unlocks the
                 # utility buttons again after a completed run — see
@@ -7074,7 +7147,7 @@ class VFXExporterApp(tk.Tk):
         self.btn_reset.unbind("<ButtonPress-1>")
         self.btn_reset.unbind("<ButtonRelease-1>")
         self._set_btn_state(self.btn_pp_export, False)
-        self._set_btn_state(self.btn_pp_reset_exp, False)
+        self._pp_set_exp_action_enabled("clear", False)
         self._pp_exp_status.config(text="Queueing episodes to Adobe Media Encoder...", fg=TEXT_MUTED)
 
         def _enable_pp_stop():
@@ -7350,7 +7423,7 @@ class VFXExporterApp(tk.Tk):
                     self._pp_refresh_social_media_enabled()
                     self._pp_refresh_srt_enabled()
                     self._pp_update_date_check.set_enabled(True)
-                self._set_btn_state(self.btn_pp_reset_exp, True)
+                self._pp_set_exp_action_enabled("clear", True)
             self.after(0, _restore_after_export)
 
     def _pp_reset_export(self):
