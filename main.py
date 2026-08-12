@@ -124,7 +124,7 @@ SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/Finishing Tool")
 #
 # MUST be bumped together with version.json's "version" on every release. A
 # drift between the two is surfaced by APP_MANIFEST_MATCHES and shown in About.
-APP_VERSION_BUILTIN = "1.0.20"
+APP_VERSION_BUILTIN = "1.0.21"
 
 
 def _version_file_candidates():
@@ -1808,6 +1808,13 @@ class VFXExporterApp(tk.Tk):
             c.itemconfig(text_id, text=text)
 
             def draw(fill, fg=None):
+                # fg PERSISTS when omitted — only the fill changes. That is
+                # deliberate (hover/press states shouldn't have to restate the
+                # text colour), but it means any transition that follows
+                # _disable_reset_btn has to pass fg explicitly, or the label
+                # keeps that call's disabled grey. Every swap to STOP does
+                # exactly that, which is why STOP used to render with
+                # greyed-out text while being perfectly clickable.
                 c.itemconfig(poly_id, fill=fill)
                 if fg is not None:
                     c.itemconfig(text_id, fill=fg)
@@ -5379,14 +5386,14 @@ class VFXExporterApp(tk.Tk):
         self.btn_reset.unbind("<ButtonRelease-1>")
 
         def _enable_pp_stop():
-            self.btn_reset._draw("#8e2a2a")
+            self.btn_reset._draw("#8e2a2a", fg="#FFFFFF")
             self.btn_reset.unbind("<Enter>")
             self.btn_reset.unbind("<Leave>")
             self.btn_reset.unbind("<ButtonPress-1>")
             self.btn_reset.unbind("<ButtonRelease-1>")
-            self.btn_reset.bind("<Enter>", lambda e: self.btn_reset._draw("#ae3a3a"))
-            self.btn_reset.bind("<Leave>", lambda e: self.btn_reset._draw("#8e2a2a"))
-            self.btn_reset.bind("<ButtonPress-1>", lambda e: self.btn_reset._draw("#6e1a1a"))
+            self.btn_reset.bind("<Enter>", lambda e: self.btn_reset._draw("#ae3a3a", fg="#FFFFFF"))
+            self.btn_reset.bind("<Leave>", lambda e: self.btn_reset._draw("#8e2a2a", fg="#FFFFFF"))
+            self.btn_reset.bind("<ButtonPress-1>", lambda e: self.btn_reset._draw("#6e1a1a", fg="#FFFFFF"))
             def _on_pp_stop(e):
                 self.btn_reset.unbind("<Enter>")
                 self.btn_reset.unbind("<Leave>")
@@ -7729,14 +7736,14 @@ class VFXExporterApp(tk.Tk):
         self._pp_exp_status.config(text="Queueing episodes to Adobe Media Encoder...", fg=TEXT_MUTED)
 
         def _enable_pp_stop():
-            self.btn_reset._draw("#8e2a2a")
+            self.btn_reset._draw("#8e2a2a", fg="#FFFFFF")
             self.btn_reset.unbind("<Enter>")
             self.btn_reset.unbind("<Leave>")
             self.btn_reset.unbind("<ButtonPress-1>")
             self.btn_reset.unbind("<ButtonRelease-1>")
-            self.btn_reset.bind("<Enter>", lambda e: self.btn_reset._draw("#ae3a3a"))
-            self.btn_reset.bind("<Leave>", lambda e: self.btn_reset._draw("#8e2a2a"))
-            self.btn_reset.bind("<ButtonPress-1>", lambda e: self.btn_reset._draw("#6e1a1a"))
+            self.btn_reset.bind("<Enter>", lambda e: self.btn_reset._draw("#ae3a3a", fg="#FFFFFF"))
+            self.btn_reset.bind("<Leave>", lambda e: self.btn_reset._draw("#8e2a2a", fg="#FFFFFF"))
+            self.btn_reset.bind("<ButtonPress-1>", lambda e: self.btn_reset._draw("#6e1a1a", fg="#FFFFFF"))
             def _on_pp_stop(e):
                 self.btn_reset.unbind("<Enter>")
                 self.btn_reset.unbind("<Leave>")
@@ -8352,15 +8359,15 @@ class VFXExporterApp(tk.Tk):
         """Set RESET ALL button to STOP state for export."""
         self.btn_reset._text = "STOP"
         self.btn_reset._bg = "#8e2a2a"
-        self.btn_reset._draw("#8e2a2a")
+        self.btn_reset._draw("#8e2a2a", fg="#FFFFFF")
         # Clear all existing bindings first
         self.btn_reset.unbind("<Enter>")
         self.btn_reset.unbind("<Leave>")
         self.btn_reset.unbind("<ButtonPress-1>")
         self.btn_reset.unbind("<ButtonRelease-1>")
-        self.btn_reset.bind("<Enter>", lambda e: self.btn_reset._draw("#ae3a3a"))
+        self.btn_reset.bind("<Enter>", lambda e: self.btn_reset._draw("#ae3a3a", fg="#FFFFFF"))
         self.btn_reset.bind("<Leave>", lambda e: self.btn_reset._draw(self.btn_reset._bg))
-        self.btn_reset.bind("<ButtonPress-1>", lambda e: self.btn_reset._draw("#6e1a1a"))
+        self.btn_reset.bind("<ButtonPress-1>", lambda e: self.btn_reset._draw("#6e1a1a", fg="#FFFFFF"))
         def _on_stop_release(e):
             # Disable immediately — re-enable when export actually stops
             self.btn_reset.unbind("<Enter>")
@@ -9448,14 +9455,14 @@ class VFXExporterApp(tk.Tk):
             self._disable_reset_btn()
             self.btn_reset._text = "STOP"
             self.btn_reset._bg = "#8e2a2a"
-            self.btn_reset._draw("#8e2a2a")
+            self.btn_reset._draw("#8e2a2a", fg="#FFFFFF")
             self.btn_reset.unbind("<Enter>")
             self.btn_reset.unbind("<Leave>")
             self.btn_reset.unbind("<ButtonPress-1>")
             self.btn_reset.unbind("<ButtonRelease-1>")
-            self.btn_reset.bind("<Enter>", lambda e: self.btn_reset._draw("#ae3a3a"))
-            self.btn_reset.bind("<Leave>", lambda e: self.btn_reset._draw("#8e2a2a"))
-            self.btn_reset.bind("<ButtonPress-1>", lambda e: self.btn_reset._draw("#6e1a1a"))
+            self.btn_reset.bind("<Enter>", lambda e: self.btn_reset._draw("#ae3a3a", fg="#FFFFFF"))
+            self.btn_reset.bind("<Leave>", lambda e: self.btn_reset._draw("#8e2a2a", fg="#FFFFFF"))
+            self.btn_reset.bind("<ButtonPress-1>", lambda e: self.btn_reset._draw("#6e1a1a", fg="#FFFFFF"))
             self._rebind_stop_handler(on_stop)
         if self._thinking_frames:
             self._animate_gif()
@@ -11579,10 +11586,10 @@ class VFXExporterApp(tk.Tk):
                 def _enable_stop_scan():
                     self.btn_reset._text = "STOP"
                     self.btn_reset._bg = "#8e2a2a"
-                    self.btn_reset._draw("#8e2a2a")
-                    self.btn_reset.bind("<Enter>", lambda e: self.btn_reset._draw("#ae3a3a"))
+                    self.btn_reset._draw("#8e2a2a", fg="#FFFFFF")
+                    self.btn_reset.bind("<Enter>", lambda e: self.btn_reset._draw("#ae3a3a", fg="#FFFFFF"))
                     self.btn_reset.bind("<Leave>", lambda e: self.btn_reset._draw(self.btn_reset._bg))
-                    self.btn_reset.bind("<ButtonPress-1>", lambda e: self.btn_reset._draw("#6e1a1a"))
+                    self.btn_reset.bind("<ButtonPress-1>", lambda e: self.btn_reset._draw("#6e1a1a", fg="#FFFFFF"))
                     def _stop_scan_release(e):
                         # Disable immediately on click
                         self.btn_reset.unbind("<Enter>")
