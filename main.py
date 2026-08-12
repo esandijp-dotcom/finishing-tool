@@ -124,7 +124,7 @@ SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/Finishing Tool")
 #
 # MUST be bumped together with version.json's "version" on every release. A
 # drift between the two is surfaced by APP_MANIFEST_MATCHES and shown in About.
-APP_VERSION_BUILTIN = "1.0.11"
+APP_VERSION_BUILTIN = "1.0.12"
 
 
 def _version_file_candidates():
@@ -2242,6 +2242,55 @@ class VFXExporterApp(tk.Tk):
 
         # ── PHASE 1 — NEST EPISODES ────────────────────────────────────────
         self._section_label(main, "PHASE 1 — NEST EPISODES")
+
+        # Settings strip, ABOVE the step row. These three are inputs to step
+        # 2, but used to sit after it in the same row, interleaved with a
+        # destructive button — so they read as more actions rather than as
+        # things to set first. Their own labelled strip leaves the step row
+        # containing nothing but steps.
+        # BG_PANEL, not the #252525 used by the chip boxes — this holds
+        # inputs, so it follows the same convention as SHOW INFO / TITLE CARD
+        # TRACK / OUTPUT FOLDER above it. #252525 sits too close to BG_DARK
+        # to read as a group at all.
+        p1_opts = tk.Frame(main, bg=BG_PANEL, padx=12, pady=8)
+        p1_opts.pack(fill="x", pady=(0, 10))
+        self._pp_p1_opts = p1_opts
+        tk.Label(p1_opts, text="BEFORE YOU NEST", font=("SF Pro Display", 10, "bold"),
+                 bg=BG_PANEL, fg=TEXT_MUTED).pack(side="left", padx=(0, 18))
+
+        # Mutes (Track.setMute) the Video Reference track + everything below
+        # it — was a one-time confirm dialog per nest run, now a persistent
+        # checkbox (same pattern as the VFX tab's "Create .xlsx" checkbox) so
+        # it's visible and settable up front instead of interrupting every
+        # reel.
+        self._pp_mute_var = tk.BooleanVar(value=False)
+        self._pp_mute_check = self._canvas_checkbox(p1_opts, self._pp_mute_var, "Mute Master Clips")
+        self._pp_mute_check.pack(side="left")
+        self._pp_mute_check.set_enabled(False)
+
+        # Nest All — when checked, Nest Episodes processes every STRINGOUT
+        # timeline in order starting from the first not-yet-nested one,
+        # instead of just the currently selected reel. Timeline selection is
+        # moot while this is on, so the dropdown locks along with it.
+        self._pp_nest_all_var = tk.BooleanVar(value=False)
+        self._pp_nest_all_check = self._canvas_checkbox(p1_opts, self._pp_nest_all_var, "Nest All")
+        self._pp_nest_all_check.pack(side="left", padx=(18, 0))
+        self._pp_nest_all_check.set_enabled(False)
+        self._pp_nest_all_var.trace_add("write", lambda *_: self._pp_on_nest_all_toggled())
+
+        tk.Label(p1_opts, text="Starting Episode #", font=FONT_SMALL,
+                 bg=BG_PANEL, fg=TEXT_MUTED).pack(side="left", padx=(18, 8))
+        self.pp_start_ep = tk.StringVar(value="1")
+        self._pp_ep_entry = tk.Entry(p1_opts, textvariable=self.pp_start_ep,
+                                      font=FONT_LABEL, bg=BG_INPUT, fg=TEXT_PRIMARY,
+                                      relief="flat", bd=4, insertbackground=TEXT_PRIMARY,
+                                      width=4, state="disabled", justify="center",
+                                      highlightthickness=0, disabledbackground=BG_INPUT,
+                                      disabledforeground=TEXT_MUTED)
+        self._pp_ep_entry.pack(side="left")
+        self._pp_ep_entry.bind("<FocusOut>", lambda e: self._pp_on_start_ep_edited())
+        self._pp_ep_entry.bind("<Return>", lambda e: self._pp_on_start_ep_edited())
+
         p1_row = tk.Frame(main, bg=BG_DARK)
         p1_row.pack(fill="x", pady=(0, 12), padx=(4, 0))
         self._pp_p1_row = p1_row
@@ -2260,50 +2309,36 @@ class VFXExporterApp(tk.Tk):
         self.btn_pp_stop_nest = self._rounded_btn(p1_row, "■ Stop",
                                                    self._pp_stop_nest_now, enabled=False)
         # Don't pack — Stop replaces Run button when running
-        self.btn_pp_reset_nest = self._rounded_btn(p1_row, "Reset Nest",
-                                                    self._pp_reset_nest_click, enabled=False)
-        self.btn_pp_reset_nest.pack(side="left")
 
-        # Skip Nest — bypass Phase 1 entirely when episodes were already
-        # nested in a previous session; unlocks Connect to AME, which then
-        # scans the project for existing FINAL_EP sequences instead of just
-        # launching AME. Only usable once connected to Premiere.
-        self.btn_pp_skip_nest = self._rounded_btn(p1_row, "Skip Nest",
+        # Secondary actions, grouped to the right and away from the numbered
+        # steps. "Reset Nest" was three operations fused into one button: it
+        # cleared this reel's progress AND untracked every reel AND discarded
+        # the timeline scan — so wanting any one of them cost you the other
+        # two, and the forced rescan read as a punishment for clicking reset.
+        # Split and named for the consequence, using the same vocabulary as
+        # Adobe Media Encoder's queue (Reset Status / Clear), which is where
+        # this workflow continues anyway.
+        p1_actions = tk.Frame(p1_row, bg=BG_DARK)
+        p1_actions.pack(side="right")
+        self.btn_pp_reset_nest = self._rounded_btn(p1_actions, "Reset status",
+                                                    self._pp_reset_status_click, enabled=False)
+        self.btn_pp_reset_nest.pack(side="left", padx=(0, 8))
+        self.btn_pp_clear_nest = self._rounded_btn(p1_actions, "Clear",
+                                                    self._pp_clear_nest_click, enabled=False)
+        self.btn_pp_clear_nest.pack(side="left", padx=(0, 8))
+        self.btn_pp_rescan_nest = self._rounded_btn(p1_actions, "Rescan",
+                                                     self._pp_rescan_nest_click, enabled=False)
+        self.btn_pp_rescan_nest.pack(side="left", padx=(0, 8))
+
+        # Bypass Phase 1 entirely when episodes were already nested in a
+        # previous session; unlocks Connect to AME, which then scans the
+        # project for existing FINAL_EP sequences instead of just launching
+        # AME. Only usable once connected to Premiere. Named for where it
+        # takes you — it lived at the far right of PHASE 1 while actually
+        # jumping to PHASE 2.
+        self.btn_pp_skip_nest = self._rounded_btn(p1_actions, "Skip to export",
                                                    self._pp_skip_nest_click, enabled=False)
-        self.btn_pp_skip_nest.pack(side="right")
-
-        # Mutes (Track.setMute) the Video Reference track + everything below
-        # it — was a one-time confirm dialog per nest run, now a persistent
-        # checkbox (same pattern as the VFX tab's "Create .xlsx" checkbox) so
-        # it's visible and settable up front instead of interrupting every
-        # reel.
-        self._pp_mute_var = tk.BooleanVar(value=False)
-        self._pp_mute_check = self._canvas_checkbox(p1_row, self._pp_mute_var, "Mute Master Clips")
-        self._pp_mute_check.pack(side="left", padx=(16, 0))
-        self._pp_mute_check.set_enabled(False)
-
-        # Nest All — when checked, Nest Episodes processes every STRINGOUT
-        # timeline in order starting from the first not-yet-nested one,
-        # instead of just the currently selected reel. Timeline selection is
-        # moot while this is on, so the dropdown locks along with it.
-        self._pp_nest_all_var = tk.BooleanVar(value=False)
-        self._pp_nest_all_check = self._canvas_checkbox(p1_row, self._pp_nest_all_var, "Nest All")
-        self._pp_nest_all_check.pack(side="left", padx=(12, 0))
-        self._pp_nest_all_check.set_enabled(False)
-        self._pp_nest_all_var.trace_add("write", lambda *_: self._pp_on_nest_all_toggled())
-
-        tk.Label(p1_row, text="Starting Episode #", font=FONT_SMALL,
-                 bg=BG_DARK, fg=TEXT_MUTED).pack(side="left", padx=(16, 8))
-        self.pp_start_ep = tk.StringVar(value="1")
-        self._pp_ep_entry = tk.Entry(p1_row, textvariable=self.pp_start_ep,
-                                      font=FONT_LABEL, bg=BG_INPUT, fg=TEXT_PRIMARY,
-                                      relief="flat", bd=4, insertbackground=TEXT_PRIMARY,
-                                      width=4, state="disabled", justify="center",
-                                      highlightthickness=0, disabledbackground=BG_INPUT,
-                                      disabledforeground=TEXT_MUTED)
-        self._pp_ep_entry.pack(side="left")
-        self._pp_ep_entry.bind("<FocusOut>", lambda e: self._pp_on_start_ep_edited())
-        self._pp_ep_entry.bind("<Return>", lambda e: self._pp_on_start_ep_edited())
+        self.btn_pp_skip_nest.pack(side="left")
 
         # Progress
         self._pp_nest_progress_var = tk.DoubleVar(value=0)
@@ -2344,27 +2379,15 @@ class VFXExporterApp(tk.Tk):
 
         # ── PHASE 2 — EXPORT ──────────────────────────────────────────────
         self._section_label(main, "PHASE 2 — EXPORT")
-        p2_row = tk.Frame(main, bg=BG_DARK)
-        p2_row.pack(fill="x", pady=(0, 12), padx=(4, 0))
-        self._pp_circ_p2_1 = self._step_circle(p2_row, "1", enabled=False)
-        # min_width=170 matches the Phase 1 connect slot's width — this
-        # button relabels itself to "Rescan Episodes" in place (see
-        # _pp_connect_ame) without ever being destroyed/recreated, so it
-        # needs enough room reserved up front for the longer text.
-        self.btn_pp_connect_ame = self._rounded_btn(p2_row, "Connect to AME", self._pp_connect_ame,
-                                                      enabled=False, min_width=170)
-        self.btn_pp_connect_ame.pack(side="left", padx=(0, 14))
-        self._pp_circ_p2_2 = self._step_circle(p2_row, "2", enabled=False)
-        self.btn_pp_export = self._rounded_btn(p2_row, "Queue Episodes",
-                                                self._pp_run_export, enabled=False, accent=True,
-                                                reserve_text="Continue Queueing")
-        self.btn_pp_export.pack(side="left", padx=(0, 14))
-        self.btn_pp_stop_exp = self._rounded_btn(p2_row, "■ Stop",
-                                                  self._pp_stop_export_now, enabled=False)
-        # Don't pack — Stop replaces Export button when running
-        self.btn_pp_reset_exp = self._rounded_btn(p2_row, "Reset Queue",
-                                                   self._pp_reset_export, enabled=False)
-        self.btn_pp_reset_exp.pack(side="left")
+
+        # Versions strip, ABOVE the step row — same reasoning as PHASE 1's
+        # "BEFORE YOU NEST": these decide what step 2 will do, so they belong
+        # before it rather than trailing off the end of the same row.
+        p2_opts = tk.Frame(main, bg=BG_PANEL, padx=12, pady=8)
+        p2_opts.pack(fill="x", pady=(0, 10))
+        self._pp_p2_opts = p2_opts
+        tk.Label(p2_opts, text="VERSIONS", font=("SF Pro Display", 10, "bold"),
+                 bg=BG_PANEL, fg=TEXT_MUTED).pack(side="left", padx=(0, 18))
 
         # Export styles — each checked style gets queued for every episode,
         # in this order, using that style's own preset (matched by exact
@@ -2377,8 +2400,8 @@ class VFXExporterApp(tk.Tk):
         for label, default_checked in (("LIVE", True), ("MARKETING", False), ("SOCIAL MEDIA", False)):
             var = tk.BooleanVar(value=default_checked)
             self._pp_style_vars[label] = var
-            chk = self._canvas_checkbox(p2_row, var, label)
-            chk.pack(side="left", padx=(16, 0))
+            chk = self._canvas_checkbox(p2_opts, var, label)
+            chk.pack(side="left", padx=(0, 18))
             chk.set_enabled(False)  # locked until Connect to AME succeeds
             self._pp_style_checks[label] = chk
             if label == "SOCIAL MEDIA":
@@ -2387,8 +2410,8 @@ class VFXExporterApp(tk.Tk):
                 # LIVE/MARKETING (not further gated on trailer presence).
                 # Requires LIVE also checked to do anything — see _pp_run_export.
                 self._pp_srt_var = tk.BooleanVar(value=False)
-                self._pp_srt_check = self._canvas_checkbox(p2_row, self._pp_srt_var, "SRT")
-                self._pp_srt_check.pack(side="left", padx=(16, 0))
+                self._pp_srt_check = self._canvas_checkbox(p2_opts, self._pp_srt_var, "SRT")
+                self._pp_srt_check.pack(side="left", padx=(0, 18))
                 self._pp_srt_check.set_enabled(False)
                 self._pp_srt_var.trace_add("write", lambda *a: self._pp_refresh_manual_folder_rows())
             if label in ("LIVE", "MARKETING"):
@@ -2407,9 +2430,41 @@ class VFXExporterApp(tk.Tk):
         # is meant to bump the date (e.g. same-day re-queues). Same
         # enabled/disabled-until-AME-connected gating as LIVE/MARKETING.
         self._pp_update_date_var = tk.BooleanVar(value=False)
-        self._pp_update_date_check = self._canvas_checkbox(p2_row, self._pp_update_date_var, "UPDATE DATE")
-        self._pp_update_date_check.pack(side="left", padx=(16, 0))
+        self._pp_update_date_check = self._canvas_checkbox(p2_opts, self._pp_update_date_var, "UPDATE DATE")
+        self._pp_update_date_check.pack(side="left")
         self._pp_update_date_check.set_enabled(False)
+
+        p2_row = tk.Frame(main, bg=BG_DARK)
+        p2_row.pack(fill="x", pady=(0, 12), padx=(4, 0))
+        self._pp_p2_row = p2_row
+        self._pp_circ_p2_1 = self._step_circle(p2_row, "1", enabled=False)
+        # min_width=170 matches the Phase 1 connect slot's width. This no
+        # longer needs reserve_text for "Rescan Episodes": step 1 used to
+        # relabel ITSELF into a rescan button once connected, so the same
+        # slot meant two different things depending on state. Rescanning is
+        # now its own control in the secondary group, and step 1 always says
+        # what it is.
+        self.btn_pp_connect_ame = self._rounded_btn(p2_row, "Connect to AME", self._pp_connect_ame,
+                                                      enabled=False, min_width=170)
+        self.btn_pp_connect_ame.pack(side="left", padx=(0, 14))
+        self._pp_circ_p2_2 = self._step_circle(p2_row, "2", enabled=False)
+        self.btn_pp_export = self._rounded_btn(p2_row, "Queue Episodes",
+                                                self._pp_run_export, enabled=False, accent=True,
+                                                reserve_text="Continue Queueing")
+        self.btn_pp_export.pack(side="left", padx=(0, 14))
+        self.btn_pp_stop_exp = self._rounded_btn(p2_row, "■ Stop",
+                                                  self._pp_stop_export_now, enabled=False)
+        # Don't pack — Stop replaces Export button when running
+
+        # Secondary actions, mirroring PHASE 1's group exactly.
+        p2_actions = tk.Frame(p2_row, bg=BG_DARK)
+        p2_actions.pack(side="right")
+        self.btn_pp_reset_exp = self._rounded_btn(p2_actions, "Clear queue",
+                                                   self._pp_reset_export, enabled=False)
+        self.btn_pp_reset_exp.pack(side="left", padx=(0, 8))
+        self.btn_pp_rescan_eps = self._rounded_btn(p2_actions, "Rescan episodes",
+                                                    self._pp_connect_ame, enabled=False)
+        self.btn_pp_rescan_eps.pack(side="left")
 
         self._pp_exp_progress_var = tk.DoubleVar(value=0)
         self._pp_exp_progress = ttk.Progressbar(main,
@@ -3728,7 +3783,7 @@ class VFXExporterApp(tk.Tk):
         self.btn_pp_run._text = "Nest Episodes"
         self.btn_pp_run._command = self._pp_run_autonest
         self._pp_refresh_nest_button_enabled()
-        self._set_btn_state(self.btn_pp_reset_nest, True)
+        self._pp_set_nest_actions_enabled(True)
         self._pp_set_circle_active(self._pp_circ_p1_2, "2")
         if reel["nest_done"]:
             self._pp_set_circle_done(self._pp_circ_p1_2)
@@ -3880,7 +3935,7 @@ class VFXExporterApp(tk.Tk):
                 self.btn_pp_run._text = "Nest Episodes"
                 self.btn_pp_run._command = self._pp_run_autonest
                 self._pp_refresh_nest_button_enabled()
-                self._set_btn_state(self.btn_pp_reset_nest, True)
+                self._pp_set_nest_actions_enabled(True)
                 # Step circle 1 (checkmark), step circle 2 (active), the
                 # dropdown's "SCANNING" placeholder, and its lock all
                 # declare the SAME thing — "Connect to Premiere is truly
@@ -3957,6 +4012,12 @@ class VFXExporterApp(tk.Tk):
             c.create_polygon(pts, fill="#3a3a3a", outline="", smooth=True, tags="bg")
             c.create_text(cw//2, ch//2, text=f"EP{ep_num:02d}",
                           font=("SF Pro Display", 10, "bold"), fill="#888888", tags="txt")
+            # Right-click puts this episode (or this one onward) back to
+            # pending. macOS reports right-click as Button-2 on some Tk
+            # builds and Button-3 on others, and Control-click is the
+            # trackpad equivalent — bind all three rather than guess.
+            for seq_ev in ("<Button-2>", "<Button-3>", "<Control-Button-1>"):
+                c.bind(seq_ev, lambda e, r=reel, i=i: self._pp_chip_menu(e, r, i))
             chips.append(c)
         reel["chips"] = chips
         self._pp_resize_window()
@@ -4919,7 +4980,9 @@ class VFXExporterApp(tk.Tk):
             sc = self.pp_show_code.get().strip() or "SHOWCODE"
             ac = self.pp_acronym.get().strip() or "ACRONYM"
             dt = self.pp_date.get().strip() or datetime.now().strftime("%y%m%d")
-            self._pp_begin_nest_thread(reel, sc, ac, dt)
+            # _pp_run_autonest already started the dots before launching this
+            # precheck — see _pp_begin_nest_thread's thinking_already_started.
+            self._pp_begin_nest_thread(reel, sc, ac, dt, thinking_already_started=True)
 
         if colliding and not self._pp_hide_overwrite_prompt:
             def _ask():
@@ -4973,13 +5036,22 @@ class VFXExporterApp(tk.Tk):
             self.btn_reset.bind("<ButtonRelease-1>", _on_pp_stop)
         self.after(0, _enable_pp_stop)
 
-    def _pp_begin_nest_thread(self, reel, sc, ac, dt):
+    def _pp_begin_nest_thread(self, reel, sc, ac, dt, thinking_already_started=False):
         """Shared tail that actually kicks off the real nest background
         task — called either right after resume=True skips the pre-check
-        above, or from _pp_precheck_and_start_nest once that's done."""
+        above, or from _pp_precheck_and_start_nest once that's done.
+
+        thinking_already_started distinguishes those two callers, and has to:
+        _thinking_depth is a reentrant counter, and _pp_autonest_task stops
+        thinking exactly ONCE when it finishes. The fresh-click path already
+        called _start_thinking() before kicking off the collision precheck, so
+        starting again here left the count at 1 after the run completed and
+        the dots span forever. The resume path has no precheck and no earlier
+        start, so it still needs this call."""
         self._pp_stop_nest = False
         self._pp_nesting_active = True
-        self._start_thinking(manage_reset_btn=False)
+        if not thinking_already_started:
+            self._start_thinking(manage_reset_btn=False)
         self._pp_set_timeline_dropdown_enabled(False)
         # Locked for the whole run, including while paused — only
         # re-enabled once nesting is genuinely, fully done (see
@@ -4991,7 +5063,7 @@ class VFXExporterApp(tk.Tk):
         self._pp_swap_reset_to_nest_stop()
         # Disable Nest Episodes button while running
         self._set_btn_state(self.btn_pp_run, False)
-        self._set_btn_state(self.btn_pp_reset_nest, False)
+        self._pp_set_nest_actions_enabled(False)
         self._pp_nest_status.config(text="Preparing nest...", fg=TEXT_MUTED)
 
         import threading
@@ -5139,9 +5211,9 @@ class VFXExporterApp(tk.Tk):
         self.btn_pp_run._command = self._pp_run_autonest
         self._set_btn_state(self.btn_pp_run, False)
         self._set_btn_state(self.btn_pp_stop_nest, False)
-        self._set_btn_state(self.btn_pp_reset_nest, False)
+        self._pp_set_nest_actions_enabled(False)
         self._pp_skip_nest_mode = False
-        self.btn_pp_skip_nest._text = "Skip Nest"
+        self.btn_pp_skip_nest._text = "Skip to export"
         self.btn_pp_skip_nest._command = self._pp_skip_nest_click
         self._set_btn_state(self.btn_pp_skip_nest, keep_premiere_connection)
         self._pp_nest_progress_var.set(0)
@@ -5168,6 +5240,8 @@ class VFXExporterApp(tk.Tk):
         self.btn_pp_connect_ame._text = "Connect to AME"
         self.btn_pp_connect_ame._command = self._pp_connect_ame
         self._set_btn_state(self.btn_pp_connect_ame, False)
+        # Rescanning is only meaningful once a scan has happened at all.
+        self._set_btn_state(self.btn_pp_rescan_eps, False)
         self.btn_pp_export._text = "Queue Episodes"
         self.btn_pp_export._command = self._pp_run_export
         self._set_btn_state(self.btn_pp_export, False)
@@ -5258,13 +5332,156 @@ class VFXExporterApp(tk.Tk):
         self.btn_pp_run._command = self._pp_run_autonest
         self._set_btn_state(self.btn_pp_run, True)
         self._set_btn_state(self.btn_pp_stop_nest, False)
-        self._set_btn_state(self.btn_pp_reset_nest, True)
+        self._pp_set_nest_actions_enabled(True)
         self._pp_set_timeline_dropdown_enabled(not self._pp_nest_all_var.get())
         self._pp_build_exp_chips()
         self._pp_refresh_export_button()
 
+    def _pp_set_nest_actions_enabled(self, enabled):
+        """Reset status / Clear / Rescan share one enabled state — they're
+        the same class of action on the same data, and previously there was
+        only one button (Reset Nest) for every call site to toggle.
+
+        getattr-guarded because some of these call sites run during the
+        initial reset that happens while the tab is still being built, before
+        the later buttons in the group exist."""
+        for name in ("btn_pp_reset_nest", "btn_pp_clear_nest", "btn_pp_rescan_nest"):
+            btn = getattr(self, name, None)
+            if btn is not None:
+                self._set_btn_state(btn, enabled)
+
+    def _pp_reel_index(self, reel):
+        """Position of a reel in self._pp_reels, by identity — list.index()
+        would compare dicts by value and could match a different reel with
+        the same contents."""
+        for i, r in enumerate(self._pp_reels):
+            if r is reel:
+                return i
+        return None
+
+    def _pp_reset_episodes(self, reel, from_idx, single=False):
+        """Put one episode, or everything from from_idx onward, back to
+        pending — the per-episode equivalent of Reset status, reached by
+        right-clicking a chip. Mirrors Resolve's "Clear Render Status" on a
+        single render job: renesting one bad episode shouldn't cost you the
+        other nineteen.
+
+        Already-created Premiere subsequences are left alone, exactly as the
+        reel-level reset leaves them — this only untracks them here and drops
+        them from the export queue's queued/disabled sets, so a renest
+        doesn't inherit a stale "already queued" state."""
+        reel_idx = self._pp_reel_index(reel)
+        if reel_idx is None:
+            return
+        idxs = [from_idx] if single else list(range(from_idx, reel["total"]))
+        idxs = [i for i in idxs if 0 <= i < reel["total"]]
+        if not idxs:
+            return
+        for i in idxs:
+            reel["done"][i] = False
+            self._pp_set_reel_chip_pending(reel, i)
+
+        ep_nums = {reel["start_ep"] + i for i in idxs}
+        dropped = set()
+        kept = []
+        for entry in self._pp_created_seqs:
+            name, _sub, r_idx = entry
+            if r_idx == reel_idx and self._pp_extract_ep_num(name) in ep_nums:
+                dropped.add(name)
+                continue
+            kept.append(entry)
+        self._pp_created_seqs = kept
+        self._pp_exp_queued -= dropped
+        self._pp_exp_disabled -= dropped
+        for n in dropped:
+            self._pp_exp_done_style.pop(n, None)
+
+        reel["resume_idx"] = min(reel["resume_idx"], from_idx)
+        reel["nest_done"] = False
+        self._pp_nest_done = False
+        self._pp_nest_resume_idx = reel["resume_idx"]
+        self.btn_pp_run._text = "Nest Episodes"
+        self.btn_pp_run._command = self._pp_run_autonest
+        self._set_btn_state(self.btn_pp_run, True)
+        self._pp_update_nest_bar()
+        self._pp_build_exp_chips()
+        self._pp_refresh_export_button()
+        first = reel["start_ep"] + idxs[0]
+        self._pp_nest_status.config(
+            text=(f"EP{first:02d} reset to pending." if single
+                  else f"Reset from EP{first:02d} onward — {len(idxs)} episode(s)."),
+            fg=TEXT_MUTED)
+
+    def _pp_chip_menu(self, event, reel, idx):
+        """Right-click menu on an episode chip. A real tk.Menu rather than
+        another hand-drawn canvas widget — the menubar already uses these, and
+        a popup needs native click-away/keyboard behavior that would have to
+        be rebuilt from scratch on a Canvas."""
+        if getattr(self, "_pp_nesting_active", False):
+            return
+        if not reel.get("done") or idx >= len(reel["done"]):
+            return
+        ep = reel["start_ep"] + idx
+        menu = tk.Menu(self, tearoff=0)
+        if reel["done"][idx]:
+            menu.add_command(label=f"Reset EP{ep:02d} to pending",
+                             command=lambda: self._pp_reset_episodes(reel, idx, single=True))
+        menu.add_command(label=f"Reset from EP{ep:02d} onward",
+                         command=lambda: self._pp_reset_episodes(reel, idx, single=False))
+        menu.add_separator()
+        menu.add_command(label="Reset this whole reel",
+                         command=self._pp_reset_status_click)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _pp_reset_status_click(self):
+        """Reset status — puts the CURRENT reel's episodes back to pending
+        and leaves everything else alone: the timeline scan, the other
+        reels, the armed selection. Matches Adobe Media Encoder's "Reset
+        Status", which returns a queue item to Ready without removing it.
+
+        This is _pp_reset_nest's plain progress reset, which already existed
+        and already did exactly this — it was just unreachable, used only
+        internally by Skip Nest. The only button wired to it went on to wipe
+        the reel model and force a rescan as well."""
+        if not self._pp_reels or self._pp_current_reel is None:
+            return
+        self._pp_reset_nest(force_all=False)
+        self._pp_nest_status.config(text="Reset to pending — timelines still scanned.",
+                                    fg=TEXT_MUTED)
+
+    def _pp_clear_nest_click(self):
+        """Clear — untracks every reel's episodes this session, not just the
+        current one, and still keeps the timeline scan. Already-created
+        Premiere subsequences are left alone, same as always; this only
+        forgets that this session made them."""
+        if not self._pp_reels:
+            return
+        self._pp_reset_nest(force_all=True)
+        self._pp_nest_status.config(text="Cleared every reel — timelines still scanned.",
+                                    fg=TEXT_MUTED)
+
+    def _pp_rescan_nest_click(self):
+        """Rescan — the only one of the three that throws work away, so it's
+        the only one that asks first. Discards every reel's scanned track and
+        tails data, which can't be recovered without re-reading the project;
+        the other two are recoverable by simply nesting again."""
+        if not self._pp_reels:
+            return
+        proceed = self._pp_alert_dialog(
+            "Rescan timelines?",
+            "This discards the track and tails data already scanned for every "
+            "reel, and re-reads it from Premiere.",
+            tip="Only needed if the project itself changed. To start the episodes "
+                "over without rescanning, use Reset status or Clear instead.")
+        if not proceed:
+            return
+        self._pp_reset_nest_click()
+
     def _pp_reset_nest_click(self):
-        """The Reset Nest button itself — goes further than the plain
+        """Rescan's implementation — goes further than the plain
         progress reset _pp_reset_nest does for Skip Nest's
         internal use (recolor chips back to pending, keep the reel
         armed). Runs _pp_reset_nest(force_all=True) first for its
@@ -5287,7 +5504,7 @@ class VFXExporterApp(tk.Tk):
         self._pp_reels = []
         self._pp_current_reel = None
         self._set_btn_state(self.btn_pp_run, False)
-        self._set_btn_state(self.btn_pp_reset_nest, False)
+        self._pp_set_nest_actions_enabled(False)
         self._pp_sync_ep_entry_enabled()
         self._pp_swap_dropdown_for_rescan_button()
         # Step circles: circle 1's slot needs a new action (Rescan Reels)
@@ -5397,7 +5614,6 @@ class VFXExporterApp(tk.Tk):
                     _status(f"Enabled + targeted {v_count} video + {a_count} audio track(s).", TEXT_MUTED)
                 except Exception:
                     _status(f"⚠ Track-enable step returned unexpected result: {enabled_counts!r}", TEXT_WARN)
-                _status(f"   after un-mute/target → {self._pp_read_video_mute_states(seq)}", TEXT_MUTED)
 
                 if not mute_ref:
                     _status("Skipped muting master clips (per your choice) — all tracks left as-is.", TEXT_MUTED)
@@ -5452,7 +5668,6 @@ class VFXExporterApp(tk.Tk):
                         _es(f"var __s={seq_ref};"
                             f"for(var t=0;t<={ref_track_idx};t++){{__s.videoTracks[t].setMute(1);}}")
                         _status(f"Muted V1–V{ref_track_idx + 1}.", TEXT_MUTED)
-                        _status(f"   after mute → {self._pp_read_video_mute_states(seq)}", TEXT_MUTED)
                         reel["setup_done"] = True
                     else:
                         _status("⚠ No reference track found below title card track — nothing muted.", TEXT_WARN)
@@ -5516,9 +5731,18 @@ class VFXExporterApp(tk.Tk):
 
                 ep_num = start_ep + idx
 
-                if idx < resume_from:
+                if idx < resume_from or reel["done"][idx]:
                     # Already handled in an earlier (stopped) run — chip is
                     # already showing done from that run, nothing to redo.
+                    #
+                    # The done[] check matters only when resume_idx has been
+                    # moved BACKWARD past episodes that are still done, which
+                    # is exactly what resetting a single chip does. In every
+                    # other flow done[] is false for everything at or after
+                    # resume_from, so this is a no-op. resume_idx is nudged
+                    # forward past them so the completion count stays honest.
+                    if reel["done"][idx]:
+                        reel["resume_idx"] = max(reel["resume_idx"], idx + 1)
                     continue
 
                 ep_start, ep_end = ep_windows[idx]
@@ -5596,16 +5820,6 @@ class VFXExporterApp(tk.Tk):
                     sub.projectItem.moveBin(output_bin)
                 except Exception as e:
                     _status(f"⚠ Couldn't move {name}: {e}", TEXT_WARN)
-                # Once per reel, read the brand-new subsequence's own track
-                # mute states straight back out of Premiere. The mute step
-                # above assumes muting the stringout carries into every
-                # subsequence made from it; nothing has ever verified that.
-                # If this prints all zeros while the stringout readback showed
-                # a muted range, the assumption is false and the mute has to be
-                # applied per-subsequence instead.
-                if not created:
-                    _status(f"   {name} tracks → {self._pp_read_video_mute_states(sub)}",
-                            TEXT_MUTED)
                 created.append(name)
                 if existing_matches:
                     # overwrite_queue is True here — the False case already
@@ -5680,7 +5894,7 @@ class VFXExporterApp(tk.Tk):
                         if next_idx is not None:
                             self._pp_log(f"→ {reel.get('reel_label', 'reel')} done — "
                                          f"continuing to the next reel...", "muted")
-                            self._set_btn_state(self.btn_pp_reset_nest, True)
+                            self._pp_set_nest_actions_enabled(True)
                             def _advance():
                                 self._pp_arm_existing_reel(next_idx)
                                 self._pp_run_autonest(resume=False, auto_chained=True)
@@ -5707,7 +5921,7 @@ class VFXExporterApp(tk.Tk):
                 else:
                     self._set_btn_state(self.btn_pp_run, True)
                     self._pp_set_timeline_dropdown_enabled(not self._pp_nest_all_var.get())
-                self._set_btn_state(self.btn_pp_reset_nest, True)
+                self._pp_set_nest_actions_enabled(True)
                 # Re-evaluate against current Nest All state, not whatever it
                 # was when this run started — catches Nest All being
                 # unchecked mid-run, which used to leave this stuck disabled.
@@ -5755,7 +5969,7 @@ class VFXExporterApp(tk.Tk):
         unlocks Connect to AME. Connect to AME then does double duty: it
         scans the project for already-nested FINAL_EP sequences instead of
         just launching AME (see _pp_connect_ame). Relabels itself into
-        "Unskip Nest" (stays clickable, doesn't self-disable like most
+        "Back to nesting" (stays clickable, doesn't self-disable like most
         buttons here) — clicking it again undoes all of this, see
         _pp_unskip_nest_click."""
         self._pp_skip_nest_mode = True
@@ -5790,7 +6004,7 @@ class VFXExporterApp(tk.Tk):
         elif getattr(self, "_pp_timeline_dropdown", None) is None:
             self._set_btn_state(self.btn_pp_connect, False)
         self._set_btn_state(self.btn_pp_run, False)
-        self._set_btn_state(self.btn_pp_reset_nest, False)
+        self._pp_set_nest_actions_enabled(False)
         self._pp_mute_check.set_enabled(False)
         self._pp_nest_all_check.set_enabled(False)
         self._pp_sync_ep_entry_enabled()
@@ -5807,7 +6021,7 @@ class VFXExporterApp(tk.Tk):
         self._set_btn_state(self.btn_pp_connect_ame, True)
         self._pp_exp_status.config(
             text="Click Connect to AME to scan the project for nested episodes.", fg=TEXT_MUTED)
-        self.btn_pp_skip_nest._text = "Unskip Nest"
+        self.btn_pp_skip_nest._text = "Back to nesting"
         self.btn_pp_skip_nest._command = self._pp_unskip_nest_click
         self._set_btn_state(self.btn_pp_skip_nest, True)
 
@@ -5923,8 +6137,10 @@ class VFXExporterApp(tk.Tk):
             self._pp_ame_connected = True
             self._pp_set_circle_done(self._pp_circ_p2_1)
             self._pp_set_circle_active(self._pp_circ_p2_2, "2")
-            self.btn_pp_connect_ame._text = "Rescan Episodes"
-            self.btn_pp_connect_ame._command = self._pp_connect_ame
+            # Step 1 keeps saying "Connect to AME" — rescanning is its own
+            # control now, unlocked here rather than by this button becoming
+            # a different button.
+            self._set_btn_state(self.btn_pp_rescan_eps, True)
         self._pp_exp_status.config(text="Scanning project for nested episodes...", fg=TEXT_MUTED)
         self._pp_ame_scan_cancel = False
 
@@ -6003,8 +6219,7 @@ class VFXExporterApp(tk.Tk):
                     self._pp_trailer_seq_name = nm
                     self._pp_refresh_social_media_enabled()
                     self._pp_refresh_manual_folder_rows()
-                self.btn_pp_connect_ame._text = "Rescan Episodes"
-                self.btn_pp_connect_ame._command = self._pp_connect_ame
+                self._set_btn_state(self.btn_pp_rescan_eps, True)
                 self._set_btn_state(self.btn_pp_connect_ame, True)
                 # A rescan is the deliberate action that unlocks the
                 # utility buttons again after a completed run — see
@@ -6240,25 +6455,6 @@ class VFXExporterApp(tk.Tk):
                 variants.append(("SOCIAL MEDIA", "_SM", "social_muted"))
                 variants.append(("SOCIAL MEDIA", "_SM_WM", "social_unmuted"))
         return variants
-
-    def _pp_read_video_mute_states(self, seq_obj):
-        """Every video track's ACTUAL mute state (Track.isMuted), read back
-        out of Premiere rather than inferred from what we just asked it to
-        do — "V1=0 V2=0 V3=1 ...", 1 meaning muted.
-
-        Diagnostic only, and deliberately swallows everything: a readback
-        must never be able to take a nest run down with it."""
-        try:
-            from pymiere.core import eval_script as _es
-            ref = "$._pymiere['{}']".format(seq_obj._pymiere_id)
-            raw = _es(f"var __s={ref}; var __r=[];"
-                      "for(var t=0;t<__s.videoTracks.numTracks;t++){"
-                      "__r.push(__s.videoTracks[t].isMuted()?1:0);}"
-                      "__r.join(',');", decode_json=False)
-            states = str(raw).strip().split(",")
-            return " ".join(f"V{i + 1}={s}" for i, s in enumerate(states) if s != "")
-        except Exception as e:
-            return f"(readback failed: {e})"
 
     def _pp_set_track_muted(self, seq_obj, track_type, track_idx, muted):
         """Sets a single track's own mute state directly (Track.setMute) —
@@ -7281,8 +7477,9 @@ class VFXExporterApp(tk.Tk):
         self.step_canvases.append(self._step_circle(btn_frame, "2", enabled=False))
         # reserve_text — this relabels itself to "Rescan Episodes" in place
         # after the first successful scan (see _do_scan), so the canvas
-        # needs to be sized for the longer text up front, same convention
-        # as btn_pp_connect_ame on the Episode Export tab.
+        # needs to be sized for the longer text up front. The Episode Export
+        # tab used to do the same to its Connect to AME button and no longer
+        # does — rescanning is a separate control there now.
         self.btn_scan = self._rounded_btn(btn_frame, "Scan Episodes", self._do_scan,
                                             enabled=False, reserve_text="Rescan Episodes")
         self.btn_scan.pack(side="left", padx=(0, 14))
