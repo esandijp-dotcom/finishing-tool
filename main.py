@@ -124,7 +124,7 @@ SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/Finishing Tool")
 #
 # MUST be bumped together with version.json's "version" on every release. A
 # drift between the two is surfaced by APP_MANIFEST_MATCHES and shown in About.
-APP_VERSION_BUILTIN = "1.0.14"
+APP_VERSION_BUILTIN = "1.0.15"
 
 
 def _version_file_candidates():
@@ -4803,8 +4803,25 @@ class VFXExporterApp(tk.Tk):
         Only the (usually much smaller) set of actual matches costs a
         Python-side round trip after that, to fetch a live Sequence object
         usable with deleteSequence()."""
-        import pymiere
+        return [(name, self._pp_sequence_at(idx))
+                for name, idx in self._pp_scan_project_final_ep_entries()]
+
+    def _pp_scan_project_final_ep_entries(self):
+        """[(name, sequence_index), ...] for the same FINAL_EP sequences
+        _pp_scan_project_final_ep_seqs finds, in ONE round trip and without
+        materialising a single Sequence object.
+
+        The names now come back from ExtendScript with the indices rather
+        than being read one at a time afterwards, and callers that only need
+        names — the pre-nest collision check is the big one, which discarded
+        every object it built — no longer pay for objects at all. On a show
+        with 60-90 episodes already nested that was ~180 round trips spent
+        answering a question about names.
+
+        Names are encodeURIComponent'd before joining, same delimiter safety
+        as _pp_batch_track_summary."""
         from pymiere.core import eval_script as _es
+        import urllib.parse
         try:
             raw = _es(
                 "var __out=[]; var __s=app.project.sequences;"
@@ -4814,16 +4831,28 @@ class VFXExporterApp(tk.Tk):
                 "var __tp='';"
                 "try{__tp=String(__s[i].projectItem.treePath).toUpperCase();}catch(e){continue;}"
                 "if(__tp.indexOf('DELIVERY')!==-1&&__tp.indexOf('FINAL')!==-1&&__tp.indexOf('ARCHIVE')===-1)"
-                "{__out.push(i);}}"
-                "__out.join(',');",
+                "{__out.push(i+','+encodeURIComponent(__nm));}}"
+                "__out.join(';');",
                 decode_json=False)
-            if not raw.strip():
-                return []
-            idxs = [int(x) for x in raw.split(",")]
-            seqs = pymiere.objects.app.project.sequences
-            return [(str(seqs[i].name), seqs[i]) for i in idxs]
+            entries = []
+            for rec in str(raw).split(";"):
+                if not rec:
+                    continue
+                idx, _, enc = rec.partition(",")
+                try:
+                    entries.append((urllib.parse.unquote(enc), int(idx)))
+                except (ValueError, TypeError):
+                    continue
+            return entries
         except Exception:
             return []
+
+    def _pp_sequence_at(self, idx):
+        """Live Sequence object for a project sequence index — the one round
+        trip deferred out of _pp_scan_project_final_ep_entries, paid only
+        when something is actually going to be done with the object."""
+        import pymiere
+        return pymiere.objects.app.project.sequences[idx]
 
     def _pp_scan_project_trailer_seq(self):
         """First sequence in the current Premiere project with both FINAL
@@ -5130,8 +5159,11 @@ class VFXExporterApp(tk.Tk):
             self.after(0, self._pp_abort_precheck_stop)
             return
         target_ep_nums = set(range(start_ep, start_ep + reel["total"]))
+        # Names only — this check never touches the Sequence objects, and
+        # building them was most of what made "Checking for existing
+        # episodes..." slow.
         existing_ep_nums = {self._pp_extract_ep_num(nm)
-                             for nm, _ in self._pp_scan_project_final_ep_seqs()} - {None}
+                             for nm, _ in self._pp_scan_project_final_ep_entries()} - {None}
         colliding = target_ep_nums & existing_ep_nums
 
         def _finish(overwrite_queue):
@@ -5638,9 +5670,13 @@ class VFXExporterApp(tk.Tk):
         menu = tk.Menu(self, tearoff=0)
         label = self._pp_armed_reel_label()
         has_reels = bool(self._pp_reels)
+        # Nest All makes "one reel" meaningless — the timeline dropdown is
+        # locked for the same reason, and _pp_reset_nest would have silently
+        # widened this to every reel anyway, which is what Reset All is for.
+        nest_all = self._pp_nest_all_var.get()
         menu.add_command(label=f"Reset {label}" if label else "Reset Reel",
                          command=self._pp_reset_status_click,
-                         state="normal" if label else "disabled")
+                         state="normal" if (label and not nest_all) else "disabled")
         menu.add_command(label="Reset All", command=self._pp_clear_nest_click,
                          state="normal" if has_reels else "disabled")
         menu.add_command(label="Rescan", command=self._pp_rescan_nest_click,
@@ -5802,11 +5838,28 @@ class VFXExporterApp(tk.Tk):
             # every other episode replaced cleanly but one stayed
             # doubled no matter how many times it was renested. Every
             # entry in the list gets deleted below when overwriting.
+            #
+            # Only this reel's own episode numbers are ever looked up here
+            # (both by all_declined below and by the nest loop), so entries
+            # for every OTHER episode in the project are built and then never
+            # touched. Filtering to the target range first means the Sequence
+            # objects — one round trip each — are only materialised for
+            # episodes this run could actually collide with: on a show with
+            # 90 already nested, that's ~20 candidates instead of 90.
+            #
+            # They are resolved up front, before the nest loop deletes
+            # anything, and deliberately NOT looked up lazily by index:
+            # deleteSequence shifts the index of every sequence after it, so
+            # an index captured now would point at the wrong sequence (or past
+            # the end) by the time a later episode's overwrite runs. A live
+            # Sequence object stays valid across those deletions.
+            target_ep_nums = set(range(start_ep, start_ep + total))
             existing_final_seqs = {}
-            for nm, s in self._pp_scan_project_final_ep_seqs():
+            for nm, idx in self._pp_scan_project_final_ep_entries():
                 n = self._pp_extract_ep_num(nm)
-                if n is not None:
-                    existing_final_seqs.setdefault(n, []).append((nm, s))
+                if n is not None and n in target_ep_nums:
+                    existing_final_seqs.setdefault(n, []).append(
+                        (nm, self._pp_sequence_at(idx)))
 
             # If every remaining episode on this reel already exists in
             # FINAL and the overwrite prompt was declined, nothing here is
