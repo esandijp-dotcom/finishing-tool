@@ -124,7 +124,7 @@ SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/Finishing Tool")
 #
 # MUST be bumped together with version.json's "version" on every release. A
 # drift between the two is surfaced by APP_MANIFEST_MATCHES and shown in About.
-APP_VERSION_BUILTIN = "1.0.19"
+APP_VERSION_BUILTIN = "1.0.20"
 
 
 def _version_file_candidates():
@@ -5322,9 +5322,17 @@ class VFXExporterApp(tk.Tk):
             return
         target_ep_nums = set(range(start_ep, start_ep + reel["total"]))
         # Names only — this check never touches the Sequence objects.
+        existing_names = self._pp_existing_final_ep_names()
         existing_ep_nums = {self._pp_extract_ep_num(nm)
-                             for nm in self._pp_existing_final_ep_names()} - {None}
+                             for nm in existing_names} - {None}
         colliding = target_ep_nums & existing_ep_nums
+        # Handed to the nest task rather than thrown away: it needs exactly
+        # this list and used to re-read the whole FINAL bin to get it, so
+        # every nest scanned the project twice. Reusing the snapshot is also
+        # the more honest answer — it is the set the overwrite prompt asked
+        # about. The task pops it, so a resume (which skips this precheck
+        # entirely) still reads fresh.
+        reel["existing_final_names"] = existing_names
 
         def _finish(overwrite_queue):
             if self._pp_stop_nest:
@@ -6014,7 +6022,14 @@ class VFXExporterApp(tk.Tk):
             # the end) by the time a later episode's overwrite runs. A live
             # Sequence object stays valid across those deletions.
             target_ep_nums = set(range(start_ep, start_ep + total))
-            colliding_names = [nm for nm in self._pp_existing_final_ep_names()
+            # Reuses the precheck's scan when there was one. Popped rather
+            # than read, so a resume — which never runs the precheck — falls
+            # through to a fresh read instead of trusting a stale snapshot
+            # from whenever this reel last started.
+            cached_names = reel.pop("existing_final_names", None)
+            all_final_names = (cached_names if cached_names is not None
+                               else self._pp_existing_final_ep_names())
+            colliding_names = [nm for nm in all_final_names
                                if self._pp_extract_ep_num(nm) in target_ep_nums]
             # One call to turn just those names into sequence indices, rather
             # than resolving an object for every nested episode in the project.
@@ -6143,44 +6158,64 @@ class VFXExporterApp(tk.Tk):
             # previously the cause of a leading blank frame on some nested
             # episodes: dividing a large tick count by TICKS_PER_SECOND and
             # back can round to the wrong tick boundary.
-            tails_start = reel["tails_tc"]  # already ticks (int), cached from prescan
-            reel_end = tails_start if tails_start is not None else int(seq.end)
+            # A fully-declined reel creates nothing, so none of the timing
+            # below is needed — and it is not cheap: ep_windows reads
+            # tc.end.ticks per title card (a round trip each, ~20 a reel) and
+            # the timecode formatting adds another. The loop still runs, to
+            # track the existing episodes for Phase 2 and mark their chips,
+            # but it only reads these for episodes it actually nests.
+            #
+            # old_in stays None here rather than 0 — the in/out restore below
+            # is skipped entirely in that case. Restoring 0,0 would wipe
+            # whatever in/out points were set on the timeline, which nothing
+            # in this path ever moved.
+            if all_declined:
+                reel_end = 0
+                old_in = old_out = None
+                ep_windows = [(0, 0)] * len(title_clips)
+                tc_pairs = [("", "")] * len(title_clips)
+                created = []
+                reel_idx = self._pp_current_reel
+                output_bin = None
+            else:
+                tails_start = reel["tails_tc"]  # already ticks (int), cached from prescan
+                reel_end = tails_start if tails_start is not None else int(seq.end)
 
-            # Store original in/out — handle case where none set
-            try:
-                old_in  = int(seq.getInPointAsTime().ticks)
-                old_out = int(seq.getOutPointAsTime().ticks)
-            except Exception:
-                old_in, old_out = 0, int(seq.end)
+                # Store original in/out — handle case where none set
+                try:
+                    old_in  = int(seq.getInPointAsTime().ticks)
+                    old_out = int(seq.getOutPointAsTime().ticks)
+                except Exception:
+                    old_in, old_out = 0, int(seq.end)
 
-            # Precompute every episode's start/end, then format all of them as
-            # on-timeline timecodes in a single ExtendScript call up front,
-            # rather than one call per episode inside the loop below.
-            ep_windows = []
-            for idx, tc in enumerate(title_clips):
-                ep_start = int(tc.end.ticks)
-                ep_end = (int(title_clips[idx + 1].start.ticks)
-                          if idx + 1 < len(title_clips) else reel_end)
-                ep_windows.append((ep_start, ep_end))
-            try:
-                zero_ticks = self._pp_get_zero_ticks(seq)
-                flat_ticks = [s + zero_ticks for pair in ep_windows for s in pair]
-                flat_tcs = self._pp_format_timecodes(seq, flat_ticks)
-                tc_pairs = [(flat_tcs[2 * i], flat_tcs[2 * i + 1]) for i in range(len(ep_windows))]
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-                _status(f"⚠ Couldn't format episode timecodes: {e}", TEXT_WARN)
-                tc_pairs = [(f"(fmt error: {e})", f"(fmt error: {e})") for _ in ep_windows]
+                # Precompute every episode's start/end, then format all of them as
+                # on-timeline timecodes in a single ExtendScript call up front,
+                # rather than one call per episode inside the loop below.
+                ep_windows = []
+                for idx, tc in enumerate(title_clips):
+                    ep_start = int(tc.end.ticks)
+                    ep_end = (int(title_clips[idx + 1].start.ticks)
+                              if idx + 1 < len(title_clips) else reel_end)
+                    ep_windows.append((ep_start, ep_end))
+                try:
+                    zero_ticks = self._pp_get_zero_ticks(seq)
+                    flat_ticks = [s + zero_ticks for pair in ep_windows for s in pair]
+                    flat_tcs = self._pp_format_timecodes(seq, flat_ticks)
+                    tc_pairs = [(flat_tcs[2 * i], flat_tcs[2 * i + 1]) for i in range(len(ep_windows))]
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    _status(f"⚠ Couldn't format episode timecodes: {e}", TEXT_WARN)
+                    tc_pairs = [(f"(fmt error: {e})", f"(fmt error: {e})") for _ in ep_windows]
 
-            created = []
-            reel_idx = self._pp_current_reel
-            project_root = pymiere.objects.app.project.rootItem
-            delivery_final_bin = self._pp_find_delivery_final_bin(project_root)
-            output_bin = delivery_final_bin if delivery_final_bin is not None else project_root
-            if delivery_final_bin is None:
-                _status("⚠ Couldn't find a DELIVERY > FINAL bin — nested episodes will "
-                        "go to the project root instead.", TEXT_WARN)
+                created = []
+                reel_idx = self._pp_current_reel
+                project_root = pymiere.objects.app.project.rootItem
+                delivery_final_bin = self._pp_find_delivery_final_bin(project_root)
+                output_bin = delivery_final_bin if delivery_final_bin is not None else project_root
+                if delivery_final_bin is None:
+                    _status("⚠ Couldn't find a DELIVERY > FINAL bin — nested episodes will "
+                            "go to the project root instead.", TEXT_WARN)
             # existing_final_seqs already scanned up front, before the
             # track targeting/muting step above.
 
@@ -6324,11 +6359,14 @@ class VFXExporterApp(tk.Tk):
                                               self._pp_update_nest_bar()))
                 self.after(0, lambda r=reel, i=idx: self._pp_set_reel_chip_done(r, i))
 
-            # Restore in/out
-            try:
-                self._pp_set_in_out_ticks(seq, old_in, old_out)
-            except Exception:
-                pass
+            # Restore in/out — skipped when the reel was fully declined, since
+            # nothing moved them and old_in was never captured. Restoring the
+            # 0,0 placeholder would wipe the timeline's real in/out points.
+            if old_in is not None:
+                try:
+                    self._pp_set_in_out_ticks(seq, old_in, old_out)
+                except Exception:
+                    pass
 
             paused = self._pp_stop_nest and reel["resume_idx"] < total
 
