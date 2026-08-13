@@ -124,7 +124,7 @@ SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/Finishing Tool")
 #
 # MUST be bumped together with version.json's "version" on every release. A
 # drift between the two is surfaced by APP_MANIFEST_MATCHES and shown in About.
-APP_VERSION_BUILTIN = "1.0.23"
+APP_VERSION_BUILTIN = "1.0.24"
 
 
 def _version_file_candidates():
@@ -2286,6 +2286,18 @@ class VFXExporterApp(tk.Tk):
         # decides each box's enabled state. uniform="outcol" forces both
         # columns to the same width even when e.g. MARKETING and TRAILER's
         # natural label widths differ.
+        # Manual mode only: send every version to one folder instead of
+        # picking a destination per version. Hidden in Auto mode, where the
+        # folders are detected rather than chosen.
+        self._pp_out_single_var = tk.BooleanVar(value=False)
+        self._pp_out_single_row = tk.Frame(self._pp_out_panel, bg=BG_PANEL)
+        self._pp_out_single_check = self._canvas_checkbox(
+            self._pp_out_single_row, self._pp_out_single_var,
+            "Send every version to one folder")
+        self._pp_out_single_check.pack(side="left")
+        self._pp_out_single_var.trace_add(
+            "write", lambda *_: self._pp_on_out_single_toggled())
+
         self._pp_out_grid = tk.Frame(self._pp_out_panel, bg=BG_PANEL)
         self._pp_out_grid.pack(fill="x")
         self._pp_out_grid.columnconfigure(0, weight=1, uniform="outcol")
@@ -3410,8 +3422,14 @@ class VFXExporterApp(tk.Tk):
         outer = tk.Frame(parent, bg=BG_PANEL)
         outer.grid(row=row, column=col, sticky="ew",
                     padx=(0, 8) if col == 0 else (8, 0), pady=(0, 8))
-        tk.Label(outer, text=label_text, font=("SF Pro Display", 10, "bold"),
-                 bg=BG_PANEL, fg=TEXT_PRIMARY, anchor="w").pack(anchor="w", pady=(8, 2))
+        cell_label = tk.Label(outer, text=label_text, font=("SF Pro Display", 10, "bold"),
+                              bg=BG_PANEL, fg=TEXT_PRIMARY, anchor="w")
+        cell_label.pack(anchor="w", pady=(8, 2))
+        # Kept so the LIVE cell can relabel itself "ALL VERSIONS" when one
+        # folder is taking everything — see _pp_refresh_out_folder_enabled.
+        if not hasattr(self, "_pp_out_labels"):
+            self._pp_out_labels = {}
+        self._pp_out_labels[label_text] = cell_label
         entry_row = tk.Frame(outer, bg=BG_PANEL)
         entry_row.pack(fill="x", pady=(0, 2))
         wrap = tk.Frame(entry_row, bg=BG_INPUT, highlightthickness=1,
@@ -3455,6 +3473,25 @@ class VFXExporterApp(tk.Tk):
     def _pp_refresh_manual_folder_rows(self):
         self._pp_refresh_out_folder_enabled()
 
+    def _pp_on_out_single_toggled(self):
+        self._pp_refresh_out_folder_enabled()
+        self._pp_refresh_manual_folder_rows()
+        self._pp_resize_window()
+
+    def _pp_resolved_out_dirs(self):
+        """{style: folder} for a queue run, honouring the single-folder
+        choice. In Manual mode with "one folder" ticked, every version —
+        LIVE, MARKETING, TRAILER and the SRT sidecars — resolves to the one
+        path in the LIVE box; filenames already distinguish them."""
+        live = self._pp_out_dir.get().strip()
+        if self._pp_out_mode.get() == "manual" and self._pp_out_single_var.get():
+            return {"LIVE": live, "MARKETING": live, "TRAILER": live}, live
+        return ({
+            "LIVE": live,
+            "MARKETING": self._pp_marketing_out_dir.get().strip(),
+            "TRAILER": self._pp_trailer_out_dir.get().strip(),
+        }, None)
+
     def _pp_refresh_out_folder_enabled(self):
         """All four Output Folder boxes (LIVE, SRT, MARKETING, TRAILER)
         stay gridded at their fixed positions at all times, in both Auto
@@ -3467,9 +3504,22 @@ class VFXExporterApp(tk.Tk):
         instead of being hidden. Re-run any time relevance changes (mode
         toggle, a style checkbox, a trailer being found, RESET ALL...)."""
         is_manual = self._pp_out_mode.get() == "manual"
-        show_marketing = is_manual and self._pp_style_vars["MARKETING"].get()
-        show_srt = is_manual and self._pp_srt_var.get() and self._pp_style_vars["LIVE"].get()
-        show_trailer = is_manual and self._pp_trailer_seq_name is not None
+        # The single-folder toggle only exists in Manual mode — Auto detects
+        # each destination, so there is nothing to consolidate.
+        if is_manual:
+            self._pp_out_single_row.pack(fill="x", pady=(0, 6),
+                                         before=self._pp_out_grid)
+        else:
+            self._pp_out_single_row.pack_forget()
+        single = is_manual and self._pp_out_single_var.get()
+        # With one folder for everything, the per-version boxes have nothing
+        # to say — LIVE's box is the single destination and the rest grey out.
+        show_marketing = is_manual and not single and self._pp_style_vars["MARKETING"].get()
+        show_srt = (is_manual and not single and self._pp_srt_var.get()
+                    and self._pp_style_vars["LIVE"].get())
+        show_trailer = is_manual and not single and self._pp_trailer_seq_name is not None
+        self._pp_out_labels["LIVE"].config(
+            text="ALL VERSIONS" if single else "LIVE")
 
         for enabled, entry, browse_btn in (
             (show_marketing, self._pp_marketing_out_entry, self._pp_marketing_out_browse_btn),
@@ -7754,18 +7804,27 @@ class VFXExporterApp(tk.Tk):
         # separate pass of its own.
         srt_active = "LIVE" in styles and self._pp_srt_var.get()
 
+        # With "one folder for everything" there is only one path to check —
+        # the per-version boxes are greyed out and empty by design, so
+        # validating them individually would block the run outright.
+        single_out = (self._pp_out_mode.get() == "manual"
+                      and self._pp_out_single_var.get())
         missing = []
-        if has_episode and "LIVE" in styles and not self._pp_out_dir.get().strip():
-            missing.append("LIVE output folder")
-        if has_episode and "MARKETING" in styles and not self._pp_marketing_out_dir.get().strip():
-            missing.append("MARKETING output folder")
-        if has_trailer and not self._pp_trailer_out_dir.get().strip():
-            missing.append("TRAILER output folder")
-        # The trailer's SRT rides along in the TRAILER output folder
-        # (already validated above) — only episodes need the separate SRT
-        # output folder.
-        if srt_active and has_episode and not self._pp_srt_out_dir.get().strip():
-            missing.append("SRT output folder")
+        if single_out:
+            if not self._pp_out_dir.get().strip():
+                missing.append("output folder")
+        else:
+            if has_episode and "LIVE" in styles and not self._pp_out_dir.get().strip():
+                missing.append("LIVE output folder")
+            if has_episode and "MARKETING" in styles and not self._pp_marketing_out_dir.get().strip():
+                missing.append("MARKETING output folder")
+            if has_trailer and not self._pp_trailer_out_dir.get().strip():
+                missing.append("TRAILER output folder")
+            # The trailer's SRT rides along in the TRAILER output folder
+            # (already validated above) — only episodes need the separate SRT
+            # output folder.
+            if srt_active and has_episode and not self._pp_srt_out_dir.get().strip():
+                missing.append("SRT output folder")
         if missing:
             self._pp_exp_status.config(text=f"✗ Missing: {', '.join(missing)}.", fg=TEXT_ERROR)
             return
@@ -7847,11 +7906,11 @@ class VFXExporterApp(tk.Tk):
         self.after(0, _enable_pp_stop)
 
         import threading
-        out_dirs = {
-            "LIVE": self._pp_out_dir.get().strip(),
-            "MARKETING": self._pp_marketing_out_dir.get().strip(),
-            "TRAILER": self._pp_trailer_out_dir.get().strip(),
-        }
+        out_dirs, single_dir = self._pp_resolved_out_dirs()
+        if single_dir:
+            # One folder for everything — the SRT sidecars follow the videos
+            # rather than keeping their own destination.
+            srt_out_dir = single_dir
         threading.Thread(target=self._pp_export_task,
                           args=(out_dirs, styles, preset_paths, srt_out_dir, srt_resolved_active),
                           daemon=True).start()
